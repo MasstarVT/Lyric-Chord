@@ -55,10 +55,19 @@ equally). The original filename title is kept in `SongInfo.alt_titles` for lyric
 MusicBrainz allows ~1 request/s and returns 503 when busy; treat it as optional.
 
 **Lyrics** (`pipeline/lyrics.py`): sidecar `.lrc`/`.txt` -> lrclib -> syncedlyrics. lrclib
-results are gathered for every title variant and ranked by `score_lyrics_candidate`
-(synced > plain, then closest reference duration), because synced lyrics only fit the
-edition they were timed for. `Lyrics.ref_duration` records that edition's length and
-`duration_mismatch()` drives both the log warning and the on-screen note. Plain lyrics
+results are gathered for every title variant (the `/get` answer is only one more
+candidate, never trusted alone) and `choose_lyrics_candidate` picks by consensus:
+records whose length matches the file are clustered by first-line time (truncated uploads
+still vote for the right start), a timeline carried by at least as many clearly
+different-length records as matching ones is treated as copied from that edition and
+heavily penalised (a plain "also exists elsewhere" test fails because junk uploads with
+absurd lengths share the correct timeline too), and the most complete record nearest the
+cluster median wins. Run the selection with DEBUG logging to see every candidate's score;
+`tests/eye in the sky.mp3` (git-ignored, 6:31 album edit) is the reference case. `score_lyrics_candidate` (synced > plain, then closest length) is only the
+fallback when no record matches the file's length. `Lyrics.ref_duration` records the
+chosen edition's length and `duration_mismatch()` drives both the log warning and the
+on-screen note. `LYRICS_CACHE_KEY` in `processor.py` must be bumped whenever selection
+logic changes, otherwise cached bad choices survive. Plain lyrics
 are spread evenly and flagged `synced=False`. An "instrumental" flag from one provider
 does not stop the search. `parse_lrc` honours the `[offset:]` header.
 

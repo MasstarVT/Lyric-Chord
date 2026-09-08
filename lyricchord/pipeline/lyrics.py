@@ -183,6 +183,108 @@ def score_lyrics_candidate(item: dict, file_duration: float) -> float:
     return base
 
 
+CLUSTER_TOLERANCE = 6.0      # seconds; first-line times this close count as the same timing
+FOREIGN_EDITION_GAP = 20.0   # a record whose length differs this much belongs to another edition
+
+
+class _Timeline:
+    """Parsed view of one synced lrclib record, used for consensus voting."""
+
+    __slots__ = ("item", "ref", "first", "last", "n_lines")
+
+    def __init__(self, item: dict, ref: float, first: float, last: float, n_lines: int):
+        self.item, self.ref, self.first, self.last, self.n_lines = item, ref, first, last, n_lines
+
+
+def _timeline(item: dict) -> Optional[_Timeline]:
+    if not item.get("syncedLyrics"):
+        return None
+    ref = float(item.get("duration") or 0)
+    lines = [l for l in parse_lrc(item["syncedLyrics"], ref) if l.text.strip()]
+    if not lines:
+        return None
+    return _Timeline(item, ref, lines[0].start, lines[-1].start, len(lines))
+
+
+def _same_start(a: _Timeline, b: _Timeline) -> bool:
+    """Records vote on where singing starts; a truncated upload still agrees on that."""
+    return abs(a.first - b.first) <= CLUSTER_TOLERANCE
+
+
+def _same_timeline(a: _Timeline, b: _Timeline) -> bool:
+    """Strict match on both ends, used to recognise a timeline copied from another edition."""
+    return abs(a.first - b.first) <= CLUSTER_TOLERANCE and abs(a.last - b.last) <= 2 * CLUSTER_TOLERANCE
+
+
+def _copied_from_other_edition(t: _Timeline, matching: List[_Timeline], foreign: List[_Timeline]) -> bool:
+    """True if this timeline is carried by at least as many records of clearly different
+    length as records of matching length.
+
+    A popular single's timing gets pasted under the album edit by several uploaders, but
+    the single itself has many more records, so the foreign sharers outnumber the
+    matching ones. The reverse (a correct album timing also present on one or two
+    oddly-labelled uploads) leaves the matching sharers in the majority.
+    """
+    foreign_sharers = sum(1 for f in foreign if _same_timeline(f, t))
+    matching_sharers = sum(1 for m in matching if _same_timeline(m, t))
+    return foreign_sharers >= max(2, matching_sharers)
+
+
+def choose_lyrics_candidate(items: List[dict], file_duration: float,
+                            tolerance: float = DURATION_TOLERANCE) -> Tuple[Optional[dict], str]:
+    """Pick the lrclib record whose timeline most plausibly belongs to this file's edition.
+
+    Community uploads often paste one edition's timings under another edition's track
+    (the radio single's timing filed under the album edit with a long intro). Duration
+    metadata alone cannot catch that, so among records whose length matches the file:
+      * records that agree on first/last line times form clusters (bigger is better);
+      * a timeline that also appears under a record of clearly different length was
+        copied from another edition and is heavily penalised;
+      * timelines whose last line sits far from the end of the file are mildly penalised;
+      * within a cluster, prefer the most complete record nearest the median start.
+    Returns (record, human note) or (None, note) if nothing usable exists.
+    """
+    timelines = [t for t in (_timeline(it) for it in items if isinstance(it, dict)) if t]
+    if file_duration > 0:
+        matching = [t for t in timelines if abs(t.ref - file_duration) <= tolerance]
+        foreign = [t for t in timelines if abs(t.ref - file_duration) > FOREIGN_EDITION_GAP]
+    else:
+        matching, foreign = timelines, []
+
+    if matching:
+        copied_flags = [_copied_from_other_edition(t, matching, foreign) for t in matching]
+        if all(copied_flags):
+            # Every candidate shares a timeline with another edition (e.g. only the outro
+            # differs between single and album). Then it is simply the right timing.
+            copied_flags = [False] * len(matching)
+        best, best_score, best_note = None, float("-inf"), ""
+        for t, copied in zip(matching, copied_flags):
+            cluster = [o for o in matching if _same_start(o, t)]
+            median_first = sorted(o.first for o in cluster)[len(cluster) // 2]
+            score = float(len(cluster))
+            if copied:
+                score -= 10.0
+            tail = (file_duration - t.last) / file_duration if file_duration > 0 else 0.0
+            score -= 3.0 * max(0.0, tail - 0.3)
+            score += 0.02 * t.n_lines
+            score -= 0.1 * abs(t.first - median_first)
+            log.debug("lrclib candidate #%s: len %.0fs first %.0fs last %.0fs lines %d cluster %d copied %s -> %.2f",
+                      t.item.get("id", "?"), t.ref, t.first, t.last, t.n_lines, len(cluster), copied, score)
+            if score > best_score:
+                best, best_score = t, score
+                best_note = (f"{len(cluster)} of {len(matching)} matching-length records agree on this start"
+                             + ("; timing copied from another edition" if copied else ""))
+        assert best is not None
+        return best.item, best_note
+
+    # No record matches this edition: fall back to the closest length, synced before plain.
+    ranked = sorted((it for it in items if isinstance(it, dict)),
+                    key=lambda it: score_lyrics_candidate(it, file_duration), reverse=True)
+    if ranked and score_lyrics_candidate(ranked[0], file_duration) >= 0:
+        return ranked[0], "no record matches this file's length; using the closest edition"
+    return None, "no usable records"
+
+
 def _pick_lrclib(item: dict) -> Optional[Hit]:
     ref = float(item.get("duration") or 0)
     if item.get("syncedLyrics"):
@@ -208,22 +310,22 @@ def _lrclib_search(params: dict) -> List[dict]:
 
 
 def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
-    """Query lrclib.net: exact match per title variant first, then a ranked search."""
+    """Query lrclib.net and choose among all records by edition consensus.
+
+    The /get endpoint's single answer is deliberately not trusted on its own: it is
+    just one more candidate for `choose_lyrics_candidate`.
+    """
     titles = info.search_titles
     if not titles:
         return None
+    candidates: Dict[object, dict] = {}
     try:
-        # 1) The /get endpoint only answers when artist, title AND duration (+-2 s) match.
         if info.artist and info.duration > 0:
             for title in titles:
                 data = _lrclib_get({"artist_name": info.artist, "track_name": title,
                                     "duration": int(round(info.duration))})
-                hit = _pick_lrclib(data) if data else None
-                if hit and hit[0]:
-                    return hit
-
-        # 2) Gather search results for every title variant and rank by edition match.
-        candidates: Dict[object, dict] = {}
+                if data:
+                    candidates.setdefault(data.get("id", id(data)), data)
         for title in titles:
             queries = [{"track_name": title, "artist_name": info.artist}] if info.artist else [{"track_name": title}]
             if info.artist:
@@ -231,13 +333,19 @@ def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
             for params in queries:
                 for item in _lrclib_search(params):
                     candidates.setdefault(item.get("id", id(item)), item)
-        ranked = sorted(candidates.values(), key=lambda it: score_lyrics_candidate(it, info.duration), reverse=True)
-        for item in ranked:
-            hit = _pick_lrclib(item)
-            if hit:
-                return hit
     except (requests.RequestException, ValueError) as exc:
         log.warning("lrclib request failed: %s", exc)
+    if not candidates:
+        return None
+
+    chosen, note = choose_lyrics_candidate(list(candidates.values()), info.duration)
+    if chosen is not None:
+        log.info("lrclib: record #%s chosen (%s)", chosen.get("id", "?"), note)
+        return _pick_lrclib(chosen)
+    # Nothing with lyrics; honour an instrumental flag only from a length-matched record.
+    for item in candidates.values():
+        if item.get("instrumental") and info.duration and abs(float(item.get("duration") or 0) - info.duration) <= DURATION_TOLERANCE:
+            return "", True, float(item.get("duration") or 0)
     return None
 
 

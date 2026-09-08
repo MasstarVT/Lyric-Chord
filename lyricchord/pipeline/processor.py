@@ -29,6 +29,9 @@ log = logging.getLogger("lyricchord")
 # progress(stage, fraction_of_this_song, human_message)
 ProgressFn = Callable[[str, float, str], None]
 
+# Bump when lyric selection logic changes so stale cached choices are not reused.
+LYRICS_CACHE_KEY = "lyrics:v2"
+
 
 class Cancelled(Exception):
     """Raised inside the pipeline when the user pressed Cancel."""
@@ -87,13 +90,13 @@ def process_song(path: Path, settings: Settings, progress: Optional[ProgressFn] 
     _check(cancel)
 
     report("lyrics", 0.08, "Fetching lyrics")
-    cached = cache.get(path, "lyrics")
+    cached = cache.get(path, LYRICS_CACHE_KEY)
     if cached:
         lyrics = Lyrics.from_dict(cached)
         log.info("Lyrics: %d lines from cache (%s)", len(lyrics.lines), lyrics.source)
     else:
         lyrics = fetch_lyrics(info, settings)
-        cache.put(path, "lyrics", lyrics.to_dict())
+        cache.put(path, LYRICS_CACHE_KEY, lyrics.to_dict())
     lyrics = apply_offset(lyrics, settings.lyrics_offset_ms)
     _check(cancel)
 

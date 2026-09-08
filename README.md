@@ -37,8 +37,11 @@ now and next on a scrolling timeline that stays in sync with the audio.
   (synced + plain), then the `syncedlyrics` aggregator (Musixmatch, NetEase, Megalobiz).
   Synced lyrics are chosen by how well their reference recording length matches your
   file, so the album edit with a long intro gets the lyrics timed for that edit rather
-  than the radio single's. If only a mismatched edition exists the log and the video say
-  so. Enhanced LRC word timings give word-accurate highlighting; a provider's
+  than the radio single's. Because community uploads often file one edition's timing
+  under another edition's track, every matching record is parsed and the start time most
+  records agree on wins; a timeline carried by at least as many records of a clearly
+  different length is treated as copied from that edition and rejected. If only a
+  mismatched edition exists the log and the video say so. Enhanced LRC word timings give word-accurate highlighting; a provider's
   "instrumental" flag is only trusted if no provider has lyrics for the track.
 - **Chords**, three sources in order of preference:
   1. A chord sheet next to the song (`Song.chords.txt`, `.cho`, `.crd`, ChordPro or

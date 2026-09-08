@@ -9,7 +9,8 @@ from lyricchord.models import Lyrics, LyricLine
 from lyricchord.pipeline.chords import theory
 from lyricchord.pipeline.chords.sheet import (align_sheet_to_lyrics, looks_like_chord_sheet,
                                               parse_chord_sheet)
-from lyricchord.pipeline.lyrics import parse_lrc, plain_to_lines, score_lyrics_candidate
+from lyricchord.pipeline.lyrics import (choose_lyrics_candidate, parse_lrc, plain_to_lines,
+                                        score_lyrics_candidate)
 from lyricchord.pipeline.metadata import artist_consensus, parse_filename, rank_musicbrainz
 from lyricchord.utils.text import clean_title, safe_filename, smart_title_case
 
@@ -56,6 +57,54 @@ def test_rank_musicbrainz_prefers_duration_and_popularity():
     # An artist hint from another source outweighs a slightly better text score.
     assert rank_musicbrainz(recordings[:1] + recordings[2:], 391.3, artist_hint="Zombi")[0] == "Zombi"
     assert rank_musicbrainz([], 100.0) is None
+
+
+def _lrc(first: float, last: float, n: int) -> str:
+    step = (last - first) / max(1, n - 1)
+    return "\n".join("[%02d:%05.2f]line %d" % ((first + i * step) // 60, (first + i * step) % 60, i) for i in range(n))
+
+
+def _rec(rid: int, duration: float, first: float, last: float, n: int = 60) -> dict:
+    return {"id": rid, "duration": duration, "syncedLyrics": _lrc(first, last, n), "plainLyrics": "x"}
+
+
+def test_choose_candidate_rejects_timing_copied_from_another_edition():
+    # Mirrors the real "Sirius / Eye in the Sky" case: the 6:31 album edit vs the 4:36 single.
+    file_len = 391.3
+    single = [_rec(i, 276 + i % 2, 19, 235) for i in range(1, 8)]           # the popular 4:36 edition
+    copied = [_rec(10 + i, 386 + i, 19, 235) for i in range(5)]             # single's timing, album length
+    right = [_rec(20, 390.3, 127, 343), _rec(21, 390, 127, 343), _rec(22, 387, 131, 346),
+             _rec(23, 392, 132, 264, n=27), _rec(24, 391, 132, 264, n=27)]
+    junk = [_rec(30, 2551, 132, 347), _rec(31, 446, 132, 347)]  # odd lengths, correct timing
+    chosen, note = choose_lyrics_candidate(single + copied + right + junk, file_len)
+    assert chosen["id"] == 22, note            # complete record nearest the cluster's median start
+    assert "5 of 10" in note and "copied" not in note
+    # Without the single's records the copied timing cannot be recognised, but the
+    # right cluster still wins on completeness and a plausible ending.
+    chosen, _ = choose_lyrics_candidate(copied + right, file_len)
+    assert chosen["id"] == 22
+
+
+def test_choose_candidate_no_penalty_when_only_the_outro_differs():
+    # Single (276 s) and album edit (330 s) share the whole vocal timeline legitimately.
+    single = [_rec(1, 276, 19, 235), _rec(2, 276, 19, 235)]
+    album = [_rec(3, 330, 19, 235), _rec(4, 331, 20, 236)]
+    chosen, note = choose_lyrics_candidate(single + album, 330.5)
+    assert chosen["id"] in (3, 4) and "copied" not in note
+
+
+def test_choose_candidate_majority_and_fallbacks():
+    good = [_rec(1, 200, 10, 180), _rec(2, 201, 11, 181), _rec(3, 199, 10, 179)]
+    odd = [_rec(4, 200, 40, 190)]
+    chosen, _ = choose_lyrics_candidate(good + odd, 200.0)
+    assert chosen["id"] in (1, 2, 3)
+    # No record of matching length: fall back to the closest edition rather than nothing.
+    chosen, note = choose_lyrics_candidate([_rec(5, 276, 19, 235)], 391.0)
+    assert chosen["id"] == 5 and "closest" in note
+    # Plain-only records are still usable when nothing synced exists.
+    chosen, _ = choose_lyrics_candidate([{"id": 6, "duration": 391, "plainLyrics": "words"}], 391.0)
+    assert chosen["id"] == 6
+    assert choose_lyrics_candidate([{"id": 7, "duration": 391, "instrumental": True}], 391.0)[0] is None
 
 
 def test_score_lyrics_candidate_ordering():
