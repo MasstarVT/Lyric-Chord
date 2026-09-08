@@ -30,7 +30,7 @@ log = logging.getLogger("lyricchord")
 ProgressFn = Callable[[str, float, str], None]
 
 # Bump when lyric selection logic changes so stale cached choices are not reused.
-LYRICS_CACHE_KEY = "lyrics:v2"
+LYRICS_CACHE_KEY = "lyrics:v3"
 
 
 class Cancelled(Exception):

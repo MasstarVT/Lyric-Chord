@@ -9,8 +9,8 @@ from lyricchord.models import Lyrics, LyricLine
 from lyricchord.pipeline.chords import theory
 from lyricchord.pipeline.chords.sheet import (align_sheet_to_lyrics, looks_like_chord_sheet,
                                               parse_chord_sheet)
-from lyricchord.pipeline.lyrics import (choose_lyrics_candidate, parse_lrc, plain_to_lines,
-                                        score_lyrics_candidate)
+from lyricchord.pipeline.lyrics import (artist_matches, choose_lyrics_candidate, parse_lrc,
+                                        plain_to_lines, score_lyrics_candidate, title_variants)
 from lyricchord.pipeline.metadata import artist_consensus, parse_filename, rank_musicbrainz
 from lyricchord.utils.text import clean_title, safe_filename, smart_title_case
 
@@ -85,6 +85,29 @@ def test_choose_candidate_rejects_timing_copied_from_another_edition():
     assert chosen["id"] == 22
 
 
+def test_choose_candidate_lets_audio_arbitrate_first_line():
+    right = [_rec(20, 390.3, 127, 343), _rec(21, 390, 127, 343), _rec(22, 387, 131, 346),
+             _rec(23, 392, 132, 264, n=27), _rec(24, 391, 132, 264, n=27),
+             _rec(25, 392, 132.4, 347, n=51)]   # same start as 23/24 (within 0.75 s), more complete
+    asked = []
+
+    def scorer(times):                       # pretend the voice clearly enters at 132 s
+        asked.extend(times)
+        return [1.0 - abs(t - 132.0) for t in times]
+
+    chosen, note = choose_lyrics_candidate(right, 391.3, onset_scorer=scorer)
+    assert chosen["id"] == 25 and "audio places the first line at 132.4s" in note
+    assert asked == [127, 131, 132]          # one representative time per distinct start
+    # Agreeing records never trigger the audio check.
+    asked.clear()
+    agree = [_rec(1, 200, 10, 180), _rec(2, 201, 10.3, 181)]
+    choose_lyrics_candidate(agree, 200.0, onset_scorer=scorer)
+    assert asked == []
+    # A failing scorer falls back to the consensus pick.
+    chosen, _ = choose_lyrics_candidate(right, 391.3, onset_scorer=lambda ts: 1 / 0)
+    assert chosen["id"] == 22
+
+
 def test_choose_candidate_no_penalty_when_only_the_outro_differs():
     # Single (276 s) and album edit (330 s) share the whole vocal timeline legitimately.
     single = [_rec(1, 276, 19, 235), _rec(2, 276, 19, 235)]
@@ -105,6 +128,23 @@ def test_choose_candidate_majority_and_fallbacks():
     chosen, _ = choose_lyrics_candidate([{"id": 6, "duration": 391, "plainLyrics": "words"}], 391.0)
     assert chosen["id"] == 6
     assert choose_lyrics_candidate([{"id": 7, "duration": 391, "instrumental": True}], 391.0)[0] is None
+
+
+def test_title_variants_cover_uploader_spellings():
+    v = title_variants("Sirius / Eye in the Sky")
+    assert v[0] == "Sirius / Eye in the Sky"
+    assert "Sirius Eye in the Sky" in v and "Sirius/Eye in the Sky" in v
+    assert title_variants("Wonderwall") == ["Wonderwall"]      # case-insensitive dedupe
+    assert len(title_variants("A - B & C")) <= 4
+
+
+def test_artist_matches_is_lenient_but_rejects_covers():
+    assert artist_matches("Alan Parsons Project", "The Alan Parsons Project")
+    assert artist_matches("The Alan Parsons Project", "Alan Parsons Project")
+    assert artist_matches("Alan Parsons Project, The", "The Alan Parsons Project")
+    assert artist_matches("anything", "")                     # unknown artist: no filtering
+    assert not artist_matches("Spanish Magic Guitar", "The Alan Parsons Project")
+    assert not artist_matches("", "The Alan Parsons Project")
 
 
 def test_score_lyrics_candidate_ordering():

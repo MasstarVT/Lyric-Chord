@@ -40,7 +40,10 @@ now and next on a scrolling timeline that stays in sync with the audio.
   than the radio single's. Because community uploads often file one edition's timing
   under another edition's track, every matching record is parsed and the start time most
   records agree on wins; a timeline carried by at least as many records of a clearly
-  different length is treated as copied from that edition and rejected. If only a
+  different length is treated as copied from that edition and rejected. When the best
+  records still disagree by a second or two (different masters have different lead-in
+  silence), the audio decides: the app measures where vocal-band energy rises at each
+  candidate start and takes the one where the voice actually enters. If only a
   mismatched edition exists the log and the video say so. Enhanced LRC word timings give word-accurate highlighting; a provider's
   "instrumental" flag is only trusted if no provider has lyrics for the track.
 - **Chords**, three sources in order of preference:

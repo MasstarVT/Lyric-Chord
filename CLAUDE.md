@@ -62,8 +62,19 @@ still vote for the right start), a timeline carried by at least as many clearly
 different-length records as matching ones is treated as copied from that edition and
 heavily penalised (a plain "also exists elsewhere" test fails because junk uploads with
 absurd lengths share the correct timeline too), and the most complete record nearest the
-cluster median wins. Run the selection with DEBUG logging to see every candidate's score;
-`tests/eye in the sky.mp3` (git-ignored, 6:31 album edit) is the reference case. `score_lyrics_candidate` (synced > plain, then closest length) is only the
+cluster median wins. If the strong records still disagree about the first line by more
+than `ONSET_DISAGREEMENT` (0.5 s), they are grouped by start and an injected
+`onset_scorer` (`pipeline/vocal.py`, vocal-band harmonic energy rise at each group's
+median start) picks the group; completeness then decides within it. The scorer is
+injected as a callable so the selection stays a pure, testable function. lrclib's search
+is non-deterministic (the same query can return 15 matching records, then 1), so
+`fetch_lrclib` fires many query variants (`title_variants`, with and without artist),
+tolerates individual failures, and drops records by other artists (`artist_matches`)
+before voting. A global vocal-onset
+detector was tried and is useless on a full mix; only this narrow comparison between a
+few candidates is reliable enough. Run the selection with DEBUG logging to see every
+candidate's score; `tests/eye in the sky.mp3` (git-ignored, 6:31 album edit, voice
+enters at 2:13) is the reference case. `score_lyrics_candidate` (synced > plain, then closest length) is only the
 fallback when no record matches the file's length. `Lyrics.ref_duration` records the
 chosen edition's length and `duration_mismatch()` drives both the log warning and the
 on-screen note. `LYRICS_CACHE_KEY` in `processor.py` must be bumped whenever selection

@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
 from ..config import Settings
 from ..models import Lyrics, LyricLine, LyricWord, SongInfo
-from ..utils.text import format_time
+from ..utils.text import format_time, normalize
 
 log = logging.getLogger("lyricchord")
 
@@ -230,8 +230,14 @@ def _copied_from_other_edition(t: _Timeline, matching: List[_Timeline], foreign:
     return foreign_sharers >= max(2, matching_sharers)
 
 
+# Given candidate first-line times, return a "voice enters here" score for each (see vocal.py).
+OnsetScorer = Callable[[List[float]], List[float]]
+ONSET_DISAGREEMENT = 0.5    # seconds; starts closer than this are the same answer (imperceptible)
+
+
 def choose_lyrics_candidate(items: List[dict], file_duration: float,
-                            tolerance: float = DURATION_TOLERANCE) -> Tuple[Optional[dict], str]:
+                            tolerance: float = DURATION_TOLERANCE,
+                            onset_scorer: Optional[OnsetScorer] = None) -> Tuple[Optional[dict], str]:
     """Pick the lrclib record whose timeline most plausibly belongs to this file's edition.
 
     Community uploads often paste one edition's timings under another edition's track
@@ -241,7 +247,10 @@ def choose_lyrics_candidate(items: List[dict], file_duration: float,
       * a timeline that also appears under a record of clearly different length was
         copied from another edition and is heavily penalised;
       * timelines whose last line sits far from the end of the file are mildly penalised;
-      * within a cluster, prefer the most complete record nearest the median start.
+      * within a cluster, prefer the most complete record nearest the median start;
+      * if the strongest records still disagree about the first line by more than
+        ONSET_DISAGREEMENT seconds (different masters, different lead-in), `onset_scorer`
+        is asked which candidate start the audio supports.
     Returns (record, human note) or (None, note) if nothing usable exists.
     """
     timelines = [t for t in (_timeline(it) for it in items if isinstance(it, dict)) if t]
@@ -258,6 +267,7 @@ def choose_lyrics_candidate(items: List[dict], file_duration: float,
             # differs between single and album). Then it is simply the right timing.
             copied_flags = [False] * len(matching)
         best, best_score, best_note = None, float("-inf"), ""
+        scored: List[Tuple[float, _Timeline]] = []
         for t, copied in zip(matching, copied_flags):
             cluster = [o for o in matching if _same_start(o, t)]
             median_first = sorted(o.first for o in cluster)[len(cluster) // 2]
@@ -268,13 +278,43 @@ def choose_lyrics_candidate(items: List[dict], file_duration: float,
             score -= 3.0 * max(0.0, tail - 0.3)
             score += 0.02 * t.n_lines
             score -= 0.1 * abs(t.first - median_first)
-            log.debug("lrclib candidate #%s: len %.0fs first %.0fs last %.0fs lines %d cluster %d copied %s -> %.2f",
+            log.debug("lrclib candidate #%s: len %.0fs first %.1fs last %.0fs lines %d cluster %d copied %s -> %.2f",
                       t.item.get("id", "?"), t.ref, t.first, t.last, t.n_lines, len(cluster), copied, score)
+            scored.append((score, t))
             if score > best_score:
                 best, best_score = t, score
                 best_note = (f"{len(cluster)} of {len(matching)} matching-length records agree on this start"
                              + ("; timing copied from another edition" if copied else ""))
         assert best is not None
+
+        # Different masters of one edition differ in lead-in silence by a second or two,
+        # and the records reflect that. Let the audio arbitrate among the strong records.
+        if onset_scorer is not None:
+            peers = sorted(((s, t) for s, t in scored if _same_start(t, best) and s >= best_score - 1.5),
+                           key=lambda st: st[1].first)
+            # Starts within ONSET_DISAGREEMENT of each other are the same answer; group them
+            # so the audio compares genuinely different starts and completeness still
+            # decides within a group.
+            groups: List[List[Tuple[float, _Timeline]]] = []
+            for s, t in peers:
+                if groups and t.first - groups[-1][0][1].first <= ONSET_DISAGREEMENT:
+                    groups[-1].append((s, t))
+                else:
+                    groups.append([(s, t)])
+            if len(groups) > 1:
+                rep_times = [sorted(t.first for _, t in g)[len(g) // 2] for g in groups]
+                try:
+                    rises = onset_scorer(rep_times)
+                except Exception as exc:  # audio problems must never sink the lyrics stage
+                    log.debug("vocal onset check failed: %s", exc)
+                    rises = []
+                if len(rises) == len(groups):
+                    own = next(i for i, g in enumerate(groups) if any(t is best for _, t in g))
+                    idx = max(range(len(groups)), key=lambda i: (round(rises[i], 3), i == own))
+                    chosen = max(groups[idx], key=lambda st: st[0])[1]
+                    if chosen is not best:
+                        best_note += f"; audio places the first line at {chosen.first:.1f}s rather than {best.first:.1f}s"
+                        best = chosen
         return best.item, best_note
 
     # No record matches this edition: fall back to the closest length, synced before plain.
@@ -294,6 +334,43 @@ def _pick_lrclib(item: dict) -> Optional[Hit]:
     if item.get("instrumental"):
         return "", True, ref
     return None
+
+
+_TITLE_SEPARATOR = re.compile(r"\s*[/|&+,]\s*|\s+-\s+")
+
+
+def title_variants(title: str, limit: int = 4) -> List[str]:
+    """Spellings uploaders use for the same track: 'Sirius / Eye in the Sky' is also filed
+    as 'Sirius/Eye in the Sky', 'Sirius - Eye In The Sky', 'Sirius, Eye in the Sky'...
+    Returns the title first, then punctuation-free and re-joined forms."""
+    out: List[str] = []
+
+    def add(t: str) -> None:
+        t = t.strip()
+        if t and t.lower() not in {o.lower() for o in out}:
+            out.append(t)
+
+    add(title)
+    parts = [p for p in _TITLE_SEPARATOR.split(title) if p.strip()]
+    if len(parts) > 1:
+        add(" ".join(parts))
+        add("/".join(parts))
+        add(" - ".join(parts))
+    add(normalize(title))
+    return out[:limit]
+
+
+def artist_matches(record_artist: str, wanted: str) -> bool:
+    """Lenient artist comparison: 'Alan Parsons Project' ~ 'The Alan Parsons Project'."""
+    if not wanted:
+        return True
+    a, b = normalize(record_artist or ""), normalize(wanted)
+    for prefix in ("the ",):
+        a = a[len(prefix):] if a.startswith(prefix) else a
+        b = b[len(prefix):] if b.startswith(prefix) else b
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
 
 
 def _lrclib_get(params: dict) -> Optional[dict]:
@@ -319,26 +396,57 @@ def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
     if not titles:
         return None
     candidates: Dict[object, dict] = {}
-    try:
-        if info.artist and info.duration > 0:
-            for title in titles:
-                data = _lrclib_get({"artist_name": info.artist, "track_name": title,
-                                    "duration": int(round(info.duration))})
-                if data:
-                    candidates.setdefault(data.get("id", id(data)), data)
+    failures = 0
+
+    def gather(fn, params: dict) -> None:
+        # One slow or failed query must not throw away what the others found.
+        nonlocal failures
+        try:
+            result = fn(params)
+        except (requests.RequestException, ValueError) as exc:
+            failures += 1
+            log.warning("lrclib request failed (%s): %s", params, exc)
+            return
+        for item in (result if isinstance(result, list) else [result] if result else []):
+            candidates.setdefault(item.get("id", id(item)), item)
+
+    if info.artist and info.duration > 0:
         for title in titles:
-            queries = [{"track_name": title, "artist_name": info.artist}] if info.artist else [{"track_name": title}]
+            gather(_lrclib_get, {"artist_name": info.artist, "track_name": title,
+                                 "duration": int(round(info.duration))})
+    # Several angles on the same song: lrclib's search is fuzzy and its result sets vary
+    # between calls, so more queries (and the spellings uploaders use) mean a steadier vote.
+    queries: List[dict] = []
+    for title in titles:
+        for k, variant in enumerate(title_variants(title)):
+            if k == 0:
+                queries.append({"track_name": variant})
+            queries.append({"q": variant})
             if info.artist:
-                queries.append({"q": f"{info.artist} {title}"})
-            for params in queries:
-                for item in _lrclib_search(params):
-                    candidates.setdefault(item.get("id", id(item)), item)
-    except (requests.RequestException, ValueError) as exc:
-        log.warning("lrclib request failed: %s", exc)
+                if k == 0:
+                    queries.append({"track_name": variant, "artist_name": info.artist})
+                queries.append({"q": f"{info.artist} {variant}"})
+    seen_queries = set()
+    for params in queries[:16]:
+        key = tuple(sorted(params.items()))
+        if key not in seen_queries:
+            seen_queries.add(key)
+            gather(_lrclib_search, params)
+    if info.artist:
+        # Covers of the same length must not vote on the timing of this recording.
+        before = len(candidates)
+        candidates = {k: v for k, v in candidates.items() if artist_matches(str(v.get("artistName") or ""), info.artist)}
+        log.debug("lrclib: %d of %d records are by '%s'", len(candidates), before, info.artist)
+    log.debug("lrclib: %d candidate records gathered (%d failed queries)", len(candidates), failures)
     if not candidates:
         return None
 
-    chosen, note = choose_lyrics_candidate(list(candidates.values()), info.duration)
+    scorer: Optional[OnsetScorer] = None
+    if info.path.is_file():
+        from .vocal import vocal_onset_rise
+
+        scorer = lambda times: vocal_onset_rise(info.path, times)  # noqa: E731
+    chosen, note = choose_lyrics_candidate(list(candidates.values()), info.duration, onset_scorer=scorer)
     if chosen is not None:
         log.info("lrclib: record #%s chosen (%s)", chosen.get("id", "?"), note)
         return _pick_lrclib(chosen)
