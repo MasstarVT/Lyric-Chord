@@ -21,7 +21,18 @@ class SongInfo:
     artist: str
     album: str = ""
     duration: float = 0.0          # seconds
-    source: str = "unknown"        # "id3" | "filename" | "acoustid"
+    source: str = "unknown"        # "id3" | "filename" | "musicbrainz" | "lrclib" | "acoustid"
+    alt_titles: List[str] = field(default_factory=list)  # other names to try when searching lyrics
+
+    @property
+    def search_titles(self) -> List[str]:
+        seen, out = set(), []
+        for t in [self.title, *self.alt_titles]:
+            key = t.strip().lower()
+            if t.strip() and key not in seen:
+                seen.add(key)
+                out.append(t.strip())
+        return out
 
     @property
     def display_title(self) -> str:
@@ -97,15 +108,24 @@ class Lyrics:
     lines: List[LyricLine] = field(default_factory=list)
     synced: bool = False        # True if timestamps came from an LRC source
     source: str = "none"        # "lrclib" | "syncedlyrics" | "sidecar" | "none"
+    ref_duration: float = 0.0   # length of the recording the lyrics were timed for (0 = unknown)
 
     @property
     def available(self) -> bool:
         return bool(self.lines)
 
+    def duration_mismatch(self, file_duration: float, tolerance: float = 8.0) -> float:
+        """Seconds of difference between the lyrics' reference recording and this file (0 if fine)."""
+        if not self.ref_duration or not file_duration or not self.synced:
+            return 0.0
+        diff = abs(self.ref_duration - file_duration)
+        return diff if diff > tolerance else 0.0
+
     def to_dict(self) -> dict:
         return {
             "synced": self.synced,
             "source": self.source,
+            "ref_duration": self.ref_duration,
             "lines": [
                 {
                     "start": l.start,
@@ -123,7 +143,8 @@ class Lyrics:
         for l in d.get("lines", []):
             words = [LyricWord(t, w) for t, w in l["words"]] if l.get("words") else None
             lines.append(LyricLine(l["start"], l["end"], l["text"], words))
-        return Lyrics(lines=lines, synced=d.get("synced", False), source=d.get("source", "none"))
+        return Lyrics(lines=lines, synced=d.get("synced", False), source=d.get("source", "none"),
+                      ref_duration=float(d.get("ref_duration", 0.0) or 0.0))
 
 
 @dataclass

@@ -9,9 +9,9 @@ from lyricchord.models import Lyrics, LyricLine
 from lyricchord.pipeline.chords import theory
 from lyricchord.pipeline.chords.sheet import (align_sheet_to_lyrics, looks_like_chord_sheet,
                                               parse_chord_sheet)
-from lyricchord.pipeline.lyrics import parse_lrc, plain_to_lines
-from lyricchord.pipeline.metadata import parse_filename
-from lyricchord.utils.text import clean_title, safe_filename
+from lyricchord.pipeline.lyrics import parse_lrc, plain_to_lines, score_lyrics_candidate
+from lyricchord.pipeline.metadata import artist_consensus, parse_filename, rank_musicbrainz
+from lyricchord.utils.text import clean_title, safe_filename, smart_title_case
 
 
 # --------------------------------------------------------------------------- metadata
@@ -26,6 +26,47 @@ def test_parse_filename_variants():
 def test_clean_title_and_safe_filename():
     assert clean_title("Hey Jude (Remastered 2015)") == "Hey Jude"
     assert safe_filename('A/B:C*D?"E') == "A_B_C_D__E"
+    assert smart_title_case("eye in the sky") == "Eye in the Sky"
+    assert smart_title_case("Already Cased") == "Already Cased"
+
+
+def test_artist_consensus_from_lrclib_results():
+    results = [
+        {"artistName": "The Alan Parsons Project", "syncedLyrics": "x"},
+        {"artistName": "Alan Parsons Project", "syncedLyrics": "x"},
+        {"artistName": "The Alan Parsons Project", "plainLyrics": "x"},
+        {"artistName": "Some Cover Band", "syncedLyrics": "x"},
+        {"artistName": "Instrumental Guy", "instrumental": True},   # no lyrics: ignored
+    ]
+    assert artist_consensus(results) == "The Alan Parsons Project"
+    assert artist_consensus([{"artistName": "A", "plainLyrics": "x"}]) is None   # too few votes
+    assert artist_consensus([]) is None
+
+
+def test_rank_musicbrainz_prefers_duration_and_popularity():
+    recordings = [
+        {"score": 100, "title": "Eye in the Sky", "length": 389000, "releases": [{}, {}],
+         "artist-credit": [{"name": "Centory"}]},
+        {"score": 84, "title": "Sirius / Eye in the Sky", "length": 391000, "releases": [{}] * 7,
+         "artist-credit": [{"name": "The Alan Parsons Project"}]},
+        {"score": 91, "title": "Sirius/Eye in the Sky", "length": 398000, "releases": [{}],
+         "artist-credit": [{"name": "Zombi"}]},
+    ]
+    assert rank_musicbrainz(recordings, 391.3) == ("The Alan Parsons Project", "Sirius / Eye in the Sky")
+    # An artist hint from another source outweighs a slightly better text score.
+    assert rank_musicbrainz(recordings[:1] + recordings[2:], 391.3, artist_hint="Zombi")[0] == "Zombi"
+    assert rank_musicbrainz([], 100.0) is None
+
+
+def test_score_lyrics_candidate_ordering():
+    synced_match = {"syncedLyrics": "x", "duration": 391}
+    synced_other_edition = {"syncedLyrics": "x", "duration": 276}
+    plain_match = {"plainLyrics": "x", "duration": 391}
+    instrumental = {"instrumental": True, "duration": 391}
+    scores = [score_lyrics_candidate(c, 391.3) for c in (synced_match, synced_other_edition, plain_match, instrumental)]
+    assert scores == sorted(scores, reverse=True)
+    assert scores[1] > scores[2]        # any synced beats any plain
+    assert scores[3] < 0
 
 
 # --------------------------------------------------------------------------- lyrics
@@ -47,6 +88,13 @@ def test_parse_enhanced_lrc_words():
     assert 0.3 < lines[0].progress_at(5.6) < 0.7
     assert lines[0].progress_at(9.0) > 0.9
     assert lines[0].progress_at(10.0) == 1.0
+
+
+def test_parse_lrc_offset_tag():
+    lines = parse_lrc("[offset:+1500]\n[00:10.00]Early\n[00:20.00]Later", duration=60)
+    assert lines[0].start == 8.5 and lines[1].start == 18.5      # positive offset = earlier
+    lines = parse_lrc("[offset:-2000]\n[00:10.00]Late", duration=60)
+    assert lines[0].start == 12.0
 
 
 def test_plain_lyrics_spread_evenly():

@@ -306,6 +306,11 @@ class FrameComposer:
         elif not self.song.lyrics.synced:
             self._blit(base, "Lyric timing is approximate (no synced lyrics found)", self.f_small, self.dim,
                        lx0 + int(20 * L.s), ly1 - self._line_height(self.f_small) - int(10 * L.s))
+        elif self.song.lyrics.duration_mismatch(info.duration):
+            note = (f"Lyrics were timed for a {format_time(self.song.lyrics.ref_duration)} recording; "
+                    f"this file is {format_time(info.duration)}")
+            self._blit(base, note, self.f_small, self.dim,
+                       lx0 + int(20 * L.s), ly1 - self._line_height(self.f_small) - int(10 * L.s))
         if not self.events:
             cx0, cy0, cx1, cy1 = L.lane_box if st.show_chord_timeline else L.chord_box
             self._blit(base, "No chords detected", self.f_context, self.dim, (cx0 + cx1) / 2,

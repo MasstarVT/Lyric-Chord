@@ -46,9 +46,21 @@ lyrics and fall back to audio analysis otherwise. `chords/local.py` is chroma te
 matching plus Viterbi smoothing; its tunables are module constants at the top of the file.
 `chords/theory.py` owns chord parsing/spelling and key logic and is used by all three.
 
-**Lyrics** (`pipeline/lyrics.py`): sidecar `.lrc`/`.txt` -> lrclib -> syncedlyrics. Plain
-lyrics are spread evenly over the song and flagged `synced=False`, which the renderer
-surfaces on screen. An "instrumental" flag from one provider does not stop the search.
+**Identification** (`pipeline/metadata.py`): tags -> filename -> title-only lookups ->
+AcoustID. Title-only lookups exist because untagged rips are common: lrclib's search
+results vote on the artist (`artist_consensus`), then a MusicBrainz recording search
+filtered by the file's duration picks the exact recording (`rank_musicbrainz` weights
+duration closeness and release count, since MusicBrainz text scores rank every cover
+equally). The original filename title is kept in `SongInfo.alt_titles` for lyric searches.
+MusicBrainz allows ~1 request/s and returns 503 when busy; treat it as optional.
+
+**Lyrics** (`pipeline/lyrics.py`): sidecar `.lrc`/`.txt` -> lrclib -> syncedlyrics. lrclib
+results are gathered for every title variant and ranked by `score_lyrics_candidate`
+(synced > plain, then closest reference duration), because synced lyrics only fit the
+edition they were timed for. `Lyrics.ref_duration` records that edition's length and
+`duration_mismatch()` drives both the log warning and the on-screen note. Plain lyrics
+are spread evenly and flagged `synced=False`. An "instrumental" flag from one provider
+does not stop the search. `parse_lrc` honours the `[offset:]` header.
 
 **Rendering** deliberately avoids MoviePy. `render/frames.py::FrameComposer` builds a static
 layer once (background, panels, header) and draws only time-dependent parts per frame,
@@ -88,6 +100,9 @@ cached per settings fingerprint.
 - `utils/audio.py::decode_audio` decodes via FFmpeg, not `librosa.load`, so MP3/M4A work
   regardless of libsndfile codec support.
 - Tests synthesise audio (sine-wave triads) rather than shipping fixtures; the chord
-  detector must recover C-G-Am-F in order from `tests/test_audio_and_render.py`.
+  detector must recover C-G-Am-F in order from `tests/test_audio_and_render.py`. Real
+  audio the owner drops into `tests/` is git-ignored; use it for manual checks only, and
+  keep network lookups out of the automated tests (rank/score functions are pure for
+  that reason).
 - The Ultimate Guitar fetcher (`chords/online.py`) parses page markup and cannot be tested
   offline; treat it as best-effort and never let its failure propagate.

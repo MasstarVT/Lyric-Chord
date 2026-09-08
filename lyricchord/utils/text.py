@@ -30,6 +30,23 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "vs"}
+
+
+def smart_title_case(text: str) -> str:
+    """'eye in the sky' -> 'Eye in the Sky'. Leaves mixed-case input untouched."""
+    if text != text.lower():
+        return text
+    words = text.split()
+    out = []
+    for i, w in enumerate(words):
+        if 0 < i < len(words) - 1 and w in _SMALL_WORDS:
+            out.append(w)
+        else:
+            out.append(w[:1].upper() + w[1:])
+    return " ".join(out)
+
+
 def format_time(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60}:{seconds % 60:02d}"

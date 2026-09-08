@@ -66,3 +66,11 @@ desktop.ini
 # LyricChord
 .lyricchord_cache/
 *.part.mp4
+
+# Local test media (copyrighted, large) - never commit
+tests/*.mp3
+tests/*.m4a
+tests/*.flac
+tests/*.wav
+tests/*.ogg
+tests/*.mp4

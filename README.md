@@ -28,12 +28,18 @@ now and next on a scrolling timeline that stays in sync with the audio.
   with per-file status, a progress bar, a colour-coded log console, and a *Preview layout*
   button that renders a sample frame with your current settings.
 - **Automatic metadata**: ID3/Vorbis/MP4 tags, then filename parsing
-  (`Artist - Title.mp3`, `01. Artist - Title (Official Video).mp3`), then optional
-  AcoustID fingerprinting.
+  (`Artist - Title.mp3`, `01. Artist - Title (Official Video).mp3`). If the artist is still
+  unknown, the title is looked up by consensus of lrclib's entries and on MusicBrainz
+  filtered by the file's duration, which also recovers the exact recording name
+  (e.g. `eye in the sky.mp3` at 6:31 resolves to "Sirius / Eye in the Sky" by The Alan
+  Parsons Project). Optional AcoustID fingerprinting comes last.
 - **Lyrics**: sidecar `.lrc`/`.txt` files, then [lrclib.net](https://lrclib.net)
   (synced + plain), then the `syncedlyrics` aggregator (Musixmatch, NetEase, Megalobiz).
-  Enhanced LRC word timings are used for word-accurate highlighting when available.
-  A provider's "instrumental" flag is only trusted if no provider has lyrics for the track.
+  Synced lyrics are chosen by how well their reference recording length matches your
+  file, so the album edit with a long intro gets the lyrics timed for that edit rather
+  than the radio single's. If only a mismatched edition exists the log and the video say
+  so. Enhanced LRC word timings give word-accurate highlighting; a provider's
+  "instrumental" flag is only trusted if no provider has lyrics for the track.
 - **Chords**, three sources in order of preference:
   1. A chord sheet next to the song (`Song.chords.txt`, `.cho`, `.crd`, ChordPro or
      Ultimate-Guitar style) aligned to the synced lyrics.
@@ -130,7 +136,7 @@ Put these next to the audio file with the same base name:
 
 | File | Purpose |
 |------|---------|
-| `Song.lrc` | Synced lyrics. Enhanced LRC (`<mm:ss.xx>` word tags) enables word-level highlighting. |
+| `Song.lrc` | Synced lyrics. Enhanced LRC (`<mm:ss.xx>` word tags) enables word-level highlighting. An `[offset:+ms]` header shifts all lines (positive = earlier, as in the LRC spec). |
 | `Song.txt` | Plain lyrics (spread evenly over the song) - or a chord sheet, detected automatically. |
 | `Song.chords.txt` / `Song.cho` / `Song.crd` | Chord sheet in Ultimate-Guitar style (chords above lyrics) or ChordPro (`[Am]inline`). Aligned to the synced lyrics, so you get exact human-verified chords instead of detected ones. |
 
@@ -231,6 +237,13 @@ order, and renders short MP4s (including loop-background mode) with the bundled 
   supply a chord sheet sidecar.
 - **Plain (unsynced) lyrics** are spread evenly across the song; the video notes that
   timing is approximate. Synced lyrics are available for most popular songs via lrclib.
+- **Wrong edition**: synced lyrics only fit the recording they were timed for. The app
+  picks the closest duration it can find and warns when nothing matches within 8 s; in
+  that case set *Lyrics offset* (a global shift) or drop a `.lrc` next to the file.
+- **Untagged files** are identified by title and duration through lrclib and
+  MusicBrainz. That needs a sensible filename (`Artist - Title.mp3` is best) and can pick
+  a cover version for very generic titles; tag your files or use AcoustID for certainty.
+- Audio files placed in `tests/` are git-ignored (they are copyrighted and large).
 - **Ultimate Guitar** has no public API. The optional fetcher parses their page
   markup and may stop working or be blocked at any time; it is off by default, falls
   back to local analysis on any failure, and you are responsible for complying with the
