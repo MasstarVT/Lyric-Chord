@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 from logging.handlers import QueueHandler
 
 LOGGER_NAME = "lyricchord"
@@ -27,7 +28,8 @@ def setup_logging(level: int = logging.INFO) -> "queue.Queue[logging.LogRecord]"
     # Avoid duplicate handlers if setup_logging is called twice (e.g. in tests).
     if not any(isinstance(h, QueueHandler) for h in logger.handlers):
         logger.addHandler(QueueHandler(q))
-    if not any(type(h) is logging.StreamHandler for h in logger.handlers):
+    # Under pythonw.exe there is no console: sys.stderr is None, so skip the stream handler.
+    if sys.stderr is not None and not any(type(h) is logging.StreamHandler for h in logger.handlers):
         stream = logging.StreamHandler()
         stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
         logger.addHandler(stream)
