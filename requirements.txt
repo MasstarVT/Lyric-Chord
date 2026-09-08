@@ -1,0 +1,23 @@
+# GUI
+customtkinter>=5.2
+tkinterdnd2>=0.4          # drag & drop (native tkdnd binaries are bundled in the wheel)
+
+# Metadata / data fetching
+mutagen>=1.47             # ID3 / Vorbis / MP4 tags
+requests>=2.31
+syncedlyrics>=1.0         # multi-provider synced lyrics (Musixmatch, NetEase, Megalobiz, lrclib)
+
+# Audio analysis
+numpy>=1.24
+scipy>=1.10
+librosa>=0.10             # chroma, beat tracking, Viterbi decoding
+soundfile>=0.12
+
+# Video rendering
+Pillow>=10.1              # frame drawing
+imageio-ffmpeg>=0.5       # bundles an FFmpeg binary for Windows / macOS / Linux
+
+# Optional: audio fingerprinting when tags AND filename are useless.
+# Also requires the `fpcalc` binary from Chromaprint (https://acoustid.org/chromaprint)
+# and a free API key from https://acoustid.org/.
+# pyacoustid>=1.3
