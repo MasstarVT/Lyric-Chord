@@ -11,7 +11,7 @@ import os
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from PIL import ImageFont
 
@@ -42,14 +42,23 @@ def font_dirs() -> List[Path]:
     return [d for d in dirs if d.is_dir()]
 
 
-@lru_cache(maxsize=1)
-def available_fonts() -> Dict[str, str]:
-    """Map of display name -> file path for every .ttf/.otf found on the system."""
+def find_named_fonts(stems: Iterable[str]) -> Dict[str, str]:
+    """Map stem -> path for the given font files, probing exact paths only.
+
+    Deliberately no directory walk: this runs on the GUI thread at startup and the
+    Windows font folder holds thousands of files.
+    """
     found: Dict[str, str] = {}
-    for d in font_dirs():
-        for p in sorted(d.rglob("*")):
-            if p.suffix.lower() in (".ttf", ".otf", ".ttc"):
-                found[p.stem] = str(p)
+    dirs = font_dirs()
+    for stem in stems:
+        for d in dirs:
+            for ext in (".ttf", ".otf", ".ttc"):
+                p = d / f"{stem}{ext}"
+                if p.exists():
+                    found[stem] = str(p)
+                    break
+            if stem in found:
+                break
     return found
 
 

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from lyricchord.config import Settings
 from lyricchord.models import Lyrics, LyricLine
@@ -12,7 +13,7 @@ from lyricchord.pipeline.chords.sheet import (align_sheet_to_lyrics, looks_like_
 from lyricchord.pipeline.lyrics import (artist_matches, choose_lyrics_candidate, parse_lrc,
                                         plain_to_lines, score_lyrics_candidate, title_variants)
 from lyricchord.pipeline.metadata import artist_consensus, parse_filename, rank_musicbrainz
-from lyricchord.utils.text import clean_title, safe_filename, smart_title_case
+from lyricchord.utils.text import artist_key, clean_title, safe_filename, smart_title_case
 
 
 # --------------------------------------------------------------------------- metadata
@@ -27,6 +28,36 @@ def test_parse_filename_variants():
 def test_clean_title_and_safe_filename():
     assert clean_title("Hey Jude (Remastered 2015)") == "Hey Jude"
     assert safe_filename('A/B:C*D?"E') == "A_B_C_D__E"
+    # Track numbers need a separator or a leading zero; bare numbers belong to the title.
+    assert clean_title("01 - Song") == "Song" and clean_title("03. Song") == "Song"
+    assert clean_title("01 Song") == "Song"
+    assert clean_title("99 Luftballons") == "99 Luftballons"
+    assert clean_title("7 Nation Army") == "7 Nation Army"
+    assert clean_title("21 Guns") == "21 Guns"
+
+
+def test_artist_key_collapses_spellings():
+    assert artist_key("Simon & Garfunkel") == artist_key("Simon and Garfunkel")
+    assert artist_key("Guns N' Roses") == artist_key("Guns and Roses")
+    assert artist_key("The Alan Parsons Project") == artist_key("Alan Parsons Project")
+
+
+def test_cancelled_is_shared_between_processor_and_renderer():
+    import lyricchord.errors as errors
+    import lyricchord.pipeline.processor as processor
+    import lyricchord.render.renderer as renderer
+    assert processor.Cancelled is errors.Cancelled and renderer.Cancelled is errors.Cancelled
+
+
+def test_ffmpeg_version_reports_missing_binary(monkeypatch):
+    from lyricchord.utils import ffmpeg as ff
+
+    def missing():
+        raise ff.FFmpegNotFound("none")
+
+    monkeypatch.setattr(ff, "find_ffmpeg", missing)
+    with pytest.raises(ff.FFmpegNotFound):
+        ff.ffmpeg_version()
     assert smart_title_case("eye in the sky") == "Eye in the Sky"
     assert smart_title_case("Already Cased") == "Already Cased"
 
@@ -204,6 +235,12 @@ def test_parse_label():
     assert theory.parse_label("Bdim") == (11, "dim")
     assert theory.parse_label("Hello") is None
     assert theory.parse_label("Am I") is None
+    # Ordinary words that begin with a note letter are not chords.
+    for word in ("Amen", "Come", "Go", "Do", "Games", "Bed", "Ago"):
+        assert theory.parse_label(word) is None, word
+    assert theory.parse_label("C(add9)") == (0, "maj")
+    assert theory.parse_label("Am7(b5)") == (9, "min7")
+    assert theory.parse_label("Co7") == (0, "dim")
 
 
 def test_spelling_and_keys():
@@ -254,6 +291,20 @@ def test_parse_ug_sheet():
     assert [c for _, c in sheet[1].chords] == ["C", "G"]
     assert sheet[1].chords[0][0] == 0 and sheet[1].chords[1][0] == 13
     assert looks_like_chord_sheet(UG_SHEET)
+
+
+def test_sheet_keeps_single_word_lyric_lines():
+    sheet = parse_chord_sheet("C  G\nAmen\nD\nthe end")
+    assert [(s.text, [c for _, c in s.chords]) for s in sheet] == [("Amen", ["C", "G"]), ("the end", ["D"])]
+    assert not looks_like_chord_sheet("Amen\nCome\nGo\nDo")
+
+
+def test_sheet_needs_synced_lyrics(tmp_path: Path):
+    from lyricchord.models import SongInfo
+    from lyricchord.pipeline.chords import track_from_sheet
+    info = SongInfo(tmp_path / "x.mp3", "T", "A", duration=30)
+    plain = Lyrics(lines=[LyricLine(2.4, 8.0, "Hello darkness my old friend")], synced=False, source="t")
+    assert not track_from_sheet(UG_SHEET, plain, info, "sheet", Settings()).available
 
 
 def test_parse_chordpro_sheet():

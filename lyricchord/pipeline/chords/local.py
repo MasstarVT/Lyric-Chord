@@ -91,7 +91,7 @@ def detect_chords(path: Path, settings: Settings, on_progress: ProgressFn = None
     boundaries = np.unique(np.concatenate([[0], beats, [n_frames]]).astype(int))
     segs = _segments(boundaries)
 
-    seg_chroma = librosa.util.sync(chroma, segs, aggregate=np.median, pad=False)
+    seg_chroma = librosa.util.sync(data=chroma, idx=segs, aggregate=np.median, pad=False)
     seg_chroma = seg_chroma / (np.linalg.norm(seg_chroma, axis=0, keepdims=True) + 1e-9)
 
     # 4) Template matching.
@@ -107,8 +107,8 @@ def detect_chords(path: Path, settings: Settings, on_progress: ProgressFn = None
 
     # 5) Viterbi smoothing: chords tend to persist for several beats.
     prob = _softmax(sim / SOFTMAX_TEMPERATURE, axis=0)
-    transition = librosa.sequence.transition_loop(len(chords), STAY_PROBABILITY)
-    states = librosa.sequence.viterbi(prob, transition)
+    transition = librosa.sequence.transition_loop(n_states=len(chords), prob=STAY_PROBABILITY)
+    states = librosa.sequence.viterbi(prob=prob, transition=transition)
     _report(on_progress, 0.9)
 
     # 6) Silence detection -> "N" (no chord).
@@ -118,7 +118,7 @@ def detect_chords(path: Path, settings: Settings, on_progress: ProgressFn = None
     silent = seg_rms < max(1e-4, SILENCE_RATIO * seg_rms.max())
 
     use_flats = settings.prefer_flats and theory.key_uses_flats(tonic, mode)
-    times = librosa.frames_to_time(boundaries, sr=SR, hop_length=HOP)
+    times = librosa.frames_to_time(frames=boundaries, sr=SR, hop_length=HOP)
     events: List[ChordEvent] = []
     for i, state in enumerate(states):
         label = "N" if silent[i] else theory.spell(chords[state][0], chords[state][1], use_flats)

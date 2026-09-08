@@ -8,20 +8,25 @@ BatchRunner:    runs process_song() for each file in a background thread and pos
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import queue
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
 from ..config import Settings
+from ..errors import Cancelled
 from ..models import ChordTrack, Lyrics, SongData, SongInfo
 from ..utils.audio import AUDIO_EXTENSIONS
 from ..utils.text import safe_filename
+from . import lyrics as lyrics_module
+from . import vocal as vocal_module
 from .cache import SongCache
-from .chords import chord_settings_fingerprint, get_chords
-from .lyrics import apply_offset, fetch_lyrics
+from .chords import chord_settings_fingerprint, get_chords, lyrics_fingerprint, sheet_source_possible
+from .lyrics import apply_offset, fetch_lyrics, has_lyrics_sidecar
 from .metadata import extract_metadata
 
 log = logging.getLogger("lyricchord")
@@ -29,12 +34,15 @@ log = logging.getLogger("lyricchord")
 # progress(stage, fraction_of_this_song, human_message)
 ProgressFn = Callable[[str, float, str], None]
 
-# Bump when lyric selection logic changes so stale cached choices are not reused.
-LYRICS_CACHE_KEY = "lyrics:v3"
 
-
-class Cancelled(Exception):
-    """Raised inside the pipeline when the user pressed Cancel."""
+@lru_cache(maxsize=1)
+def lyrics_cache_key() -> str:
+    """Cache key derived from the lyric-selection source files, so any change to the
+    selection logic invalidates cached picks automatically (no manual version bump)."""
+    digest = hashlib.sha1()
+    for module in (lyrics_module, vocal_module):
+        digest.update(Path(module.__file__).read_bytes())
+    return "lyrics:" + digest.hexdigest()[:12]
 
 
 def find_audio_files(paths: Iterable[str], recursive: bool = True) -> List[Path]:
@@ -90,18 +98,24 @@ def process_song(path: Path, settings: Settings, progress: Optional[ProgressFn] 
     _check(cancel)
 
     report("lyrics", 0.08, "Fetching lyrics")
-    cached = cache.get(path, LYRICS_CACHE_KEY)
+    # Sidecar files are read fresh every run; only successful online lookups are cached,
+    # so a failed lookup is retried next time instead of being remembered as "no lyrics".
+    sidecar = has_lyrics_sidecar(path)
+    cached = None if sidecar else cache.get(path, lyrics_cache_key())
     if cached:
         lyrics = Lyrics.from_dict(cached)
         log.info("Lyrics: %d lines from cache (%s)", len(lyrics.lines), lyrics.source)
     else:
-        lyrics = fetch_lyrics(info, settings)
-        cache.put(path, LYRICS_CACHE_KEY, lyrics.to_dict())
+        lyrics = fetch_lyrics(info)
+        if lyrics.available and not sidecar:
+            cache.put(path, lyrics_cache_key(), lyrics.to_dict())
     lyrics = apply_offset(lyrics, settings.lyrics_offset_ms)
     _check(cancel)
 
     report("chords", 0.2, "Detecting chords")
     key = f"chords:{chord_settings_fingerprint(settings)}"
+    if sheet_source_possible(path, settings):
+        key += f":{lyrics_fingerprint(lyrics)}"   # sheet chords are aligned to these lyrics
     cached = cache.get(path, key)
     if cached:
         chords = ChordTrack.from_dict(cached)

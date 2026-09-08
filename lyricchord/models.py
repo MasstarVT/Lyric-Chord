@@ -1,13 +1,14 @@
 """
 Data models shared across the pipeline.
 
-Everything here is a plain dataclass so it can be serialised to JSON for the
-on-disk cache (see pipeline.cache) and passed safely between worker threads.
+Everything here is a plain dataclass passed between pipeline stages and worker
+threads. `Lyrics` and `ChordTrack` also round-trip through JSON for the on-disk
+cache (see pipeline.cache); `SongInfo` is recomputed from the file each run.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -41,17 +42,6 @@ class SongInfo:
     @property
     def display_artist(self) -> str:
         return self.artist or "Unknown Artist"
-
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        d["path"] = str(self.path)
-        return d
-
-    @staticmethod
-    def from_dict(d: dict) -> "SongInfo":
-        d = dict(d)
-        d["path"] = Path(d["path"])
-        return SongInfo(**d)
 
 
 @dataclass

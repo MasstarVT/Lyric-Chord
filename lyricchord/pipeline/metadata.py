@@ -24,14 +24,14 @@ import requests
 from ..config import Settings
 from ..models import SongInfo
 from ..utils.audio import probe_duration
-from ..utils.text import clean_title, normalize, smart_title_case
+from ..utils.net import HTTP_HEADERS
+from ..utils.text import artist_key, clean_title, normalize, smart_title_case
 
 log = logging.getLogger("lyricchord")
 
 # Separators that commonly divide artist from title in filenames.
 _SEPARATORS = [" - ", " – ", " — ", "_-_", " -- ", " _ "]
 
-HTTP_HEADERS = {"User-Agent": "LyricChord/1.0 (https://github.com/MasstarVT/Lyric-Chord)"}
 LRCLIB_SEARCH = "https://lrclib.net/api/search"
 MUSICBRAINZ_RECORDING = "https://musicbrainz.org/ws/2/recording/"
 MB_TIMEOUT = 12          # MusicBrainz can be slow or answer 503 when busy; never block a batch on it
@@ -89,7 +89,9 @@ def artist_consensus(results: List[dict], min_votes: int = 2, min_share: float =
         name = str(item.get("artistName") or "").strip()
         if not name or not (item.get("syncedLyrics") or item.get("plainLyrics")):
             continue
-        key = normalize(name).replace("the ", "", 1) if normalize(name).startswith("the ") else normalize(name)
+        key = artist_key(name)
+        if not key:
+            continue
         weight = 2 if item.get("syncedLyrics") else 1
         votes[key] += weight
         display[key][name] += 1
@@ -205,6 +207,14 @@ def extract_metadata(path: Path, settings: Settings) -> SongInfo:
         duration = probe_duration(path)
     title = clean_title(title) or path.stem
 
+    # Fingerprinting is authoritative, so when it is configured it goes before the
+    # fuzzy title-only guesses below.
+    if not artist and settings.acoustid_api_key:
+        hit = identify_acoustid(path, settings.acoustid_api_key)
+        if hit:
+            artist, title = hit
+            source = "acoustid"
+
     if not artist and title:
         log.info("No artist in tags or filename; looking '%s' up by title and length", title)
         hint = lrclib_artist_for_title(title)
@@ -218,12 +228,8 @@ def extract_metadata(path: Path, settings: Settings) -> SongInfo:
         elif hint:
             artist, source = hint, "lrclib"
 
-    if (not artist or not title) and settings.acoustid_api_key:
-        hit = identify_acoustid(path, settings.acoustid_api_key)
-        if hit:
-            artist, title = hit
-            source = "acoustid"
-
+    # Titles from lookups can carry "(Remastered)"-style noise too.
+    title = clean_title(title) or path.stem
     if source == "filename":
         title = smart_title_case(title)
     info = SongInfo(path=path, title=title, artist=artist.strip(), album=album,

@@ -18,14 +18,17 @@ still shows something sensible; the `synced` flag lets the renderer say so.
 from __future__ import annotations
 
 import logging
+import math
 import re
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from ..config import Settings
 from ..models import Lyrics, LyricLine, LyricWord, SongInfo
-from ..utils.text import format_time, normalize
+from ..utils.net import HTTP_HEADERS
+from ..utils.text import artist_key, format_time, normalize
 
 log = logging.getLogger("lyricchord")
 
@@ -34,12 +37,21 @@ WORD_TAG = re.compile(r"<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>")
 META_TAG = re.compile(r"^\[([a-zA-Z]+):([^\]]*)\]$")
 
 MAX_LINE_HOLD = 10.0   # seconds a lyric line stays on screen without a following line
-HTTP_HEADERS = {"User-Agent": "LyricChord/1.0 (https://github.com/MasstarVT/Lyric-Chord)"}
 LRCLIB_BASE = "https://lrclib.net/api"
+LRCLIB_PARALLELISM = 6     # concurrent lrclib queries per song
 DURATION_TOLERANCE = 8.0   # seconds; beyond this the lyrics are for a different edition
 
-# A provider hit: (lyrics text, synced?, reference duration in seconds or 0)
+# A provider hit: (lyrics text, synced?, reference duration in seconds or 0).
+# Empty text with synced=True means "the provider says this track is instrumental".
 Hit = Tuple[str, bool, float]
+
+
+def _num(value) -> float:
+    """Tolerant float for JSON fields that are occasionally null, strings or junk."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # --------------------------------------------------------------------------- parsing
@@ -148,19 +160,25 @@ def apply_offset(lyrics: Lyrics, offset_ms: int) -> Lyrics:
 
 
 # --------------------------------------------------------------------------- providers
-def _sidecar(info: SongInfo) -> Optional[Tuple[str, bool, float, str]]:
-    """Return (text, synced, ref_duration, source) from a .lrc/.txt next to the audio file."""
+def has_lyrics_sidecar(path: Path) -> bool:
+    """True if a .lrc or .txt sits next to the audio (read fresh every run, never cached)."""
+    return path.with_suffix(".lrc").exists() or path.with_suffix(".txt").exists()
+
+
+def _sidecar(info: SongInfo) -> Optional[Hit]:
+    """Lyrics from a .lrc/.txt next to the audio file. A blank file is ignored, not
+    mistaken for an instrumental declaration."""
     lrc = info.path.with_suffix(".lrc")
     if lrc.exists():
-        return lrc.read_text(encoding="utf-8", errors="ignore"), True, info.duration, "sidecar"
+        content = lrc.read_text(encoding="utf-8", errors="ignore")
+        return (content, True, info.duration) if content.strip() else None
     txt = info.path.with_suffix(".txt")
     if txt.exists():
         from .chords.sheet import looks_like_chord_sheet
 
         content = txt.read_text(encoding="utf-8", errors="ignore")
-        if not looks_like_chord_sheet(content):
-            synced = bool(LRC_TAG.search(content))
-            return content, synced, info.duration, "sidecar"
+        if content.strip() and not looks_like_chord_sheet(content):
+            return content, bool(LRC_TAG.search(content)), info.duration
     return None
 
 
@@ -176,7 +194,7 @@ def score_lyrics_candidate(item: dict, file_duration: float) -> float:
         base = 1.0
     else:
         return -1.0
-    ref = float(item.get("duration") or 0)
+    ref = _num(item.get("duration"))
     if file_duration and ref:
         delta = abs(ref - file_duration)
         base -= min(0.9, delta / 120.0) if delta > 2.0 else 0.0
@@ -197,9 +215,9 @@ class _Timeline:
 
 
 def _timeline(item: dict) -> Optional[_Timeline]:
-    if not item.get("syncedLyrics"):
+    if not isinstance(item.get("syncedLyrics"), str) or not item["syncedLyrics"]:
         return None
-    ref = float(item.get("duration") or 0)
+    ref = _num(item.get("duration"))
     lines = [l for l in parse_lrc(item["syncedLyrics"], ref) if l.text.strip()]
     if not lines:
         return None
@@ -308,7 +326,7 @@ def choose_lyrics_candidate(items: List[dict], file_duration: float,
                 except Exception as exc:  # audio problems must never sink the lyrics stage
                     log.debug("vocal onset check failed: %s", exc)
                     rises = []
-                if len(rises) == len(groups):
+                if len(rises) == len(groups) and all(math.isfinite(r) for r in rises):
                     own = next(i for i, g in enumerate(groups) if any(t is best for _, t in g))
                     idx = max(range(len(groups)), key=lambda i: (round(rises[i], 3), i == own))
                     chosen = max(groups[idx], key=lambda st: st[0])[1]
@@ -326,7 +344,7 @@ def choose_lyrics_candidate(items: List[dict], file_duration: float,
 
 
 def _pick_lrclib(item: dict) -> Optional[Hit]:
-    ref = float(item.get("duration") or 0)
+    ref = _num(item.get("duration"))
     if item.get("syncedLyrics"):
         return item["syncedLyrics"], True, ref
     if item.get("plainLyrics"):
@@ -361,13 +379,11 @@ def title_variants(title: str, limit: int = 4) -> List[str]:
 
 
 def artist_matches(record_artist: str, wanted: str) -> bool:
-    """Lenient artist comparison: 'Alan Parsons Project' ~ 'The Alan Parsons Project'."""
+    """Lenient artist comparison: 'Alan Parsons Project' ~ 'The Alan Parsons Project',
+    'Simon & Garfunkel' ~ 'Simon and Garfunkel' (see utils.text.artist_key)."""
     if not wanted:
         return True
-    a, b = normalize(record_artist or ""), normalize(wanted)
-    for prefix in ("the ",):
-        a = a[len(prefix):] if a.startswith(prefix) else a
-        b = b[len(prefix):] if b.startswith(prefix) else b
+    a, b = artist_key(record_artist or ""), artist_key(wanted)
     if not a or not b:
         return False
     return a == b or a in b or b in a
@@ -395,27 +411,14 @@ def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
     titles = info.search_titles
     if not titles:
         return None
-    candidates: Dict[object, dict] = {}
-    failures = 0
 
-    def gather(fn, params: dict) -> None:
-        # One slow or failed query must not throw away what the others found.
-        nonlocal failures
-        try:
-            result = fn(params)
-        except (requests.RequestException, ValueError) as exc:
-            failures += 1
-            log.warning("lrclib request failed (%s): %s", params, exc)
-            return
-        for item in (result if isinstance(result, list) else [result] if result else []):
-            candidates.setdefault(item.get("id", id(item)), item)
-
-    if info.artist and info.duration > 0:
-        for title in titles:
-            gather(_lrclib_get, {"artist_name": info.artist, "track_name": title,
-                                 "duration": int(round(info.duration))})
     # Several angles on the same song: lrclib's search is fuzzy and its result sets vary
     # between calls, so more queries (and the spellings uploaders use) mean a steadier vote.
+    jobs: List[Tuple[Callable[[dict], object], dict]] = []
+    if info.artist and info.duration > 0:
+        for title in titles:
+            jobs.append((_lrclib_get, {"artist_name": info.artist, "track_name": title,
+                                       "duration": int(round(info.duration))}))
     queries: List[dict] = []
     for title in titles:
         for k, variant in enumerate(title_variants(title)):
@@ -431,12 +434,39 @@ def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
         key = tuple(sorted(params.items()))
         if key not in seen_queries:
             seen_queries.add(key)
-            gather(_lrclib_search, params)
+            jobs.append((_lrclib_search, params))
+
+    def run(job: Tuple[Callable[[dict], object], dict]) -> Tuple[dict, object, Optional[Exception]]:
+        fn, params = job
+        try:
+            return params, fn(params), None
+        except (requests.RequestException, ValueError) as exc:
+            return params, None, exc
+
+    # Independent requests, so run them together; one slow or failed query neither
+    # stalls nor discards the others.
+    candidates: Dict[object, dict] = {}
+    failures = 0
+    with ThreadPoolExecutor(max_workers=LRCLIB_PARALLELISM) as pool:
+        for params, result, exc in pool.map(run, jobs):
+            if exc is not None:
+                failures += 1
+                log.warning("lrclib request failed (%s): %s", params, exc)
+                continue
+            for item in (result if isinstance(result, list) else [result] if result else []):
+                if isinstance(item, dict):
+                    candidates.setdefault(item.get("id", id(item)), item)
+
     if info.artist:
-        # Covers of the same length must not vote on the timing of this recording.
-        before = len(candidates)
-        candidates = {k: v for k, v in candidates.items() if artist_matches(str(v.get("artistName") or ""), info.artist)}
-        log.debug("lrclib: %d of %d records are by '%s'", len(candidates), before, info.artist)
+        # Covers of the same length must not vote on the timing of this recording - but
+        # the artist may itself be a guess, so an empty result keeps the unfiltered pool.
+        by_artist = {k: v for k, v in candidates.items()
+                     if artist_matches(str(v.get("artistName") or ""), info.artist)}
+        log.debug("lrclib: %d of %d records are by '%s'", len(by_artist), len(candidates), info.artist)
+        if by_artist:
+            candidates = by_artist
+        elif candidates:
+            log.info("lrclib: no records credited to '%s'; considering all %d records", info.artist, len(candidates))
     log.debug("lrclib: %d candidate records gathered (%d failed queries)", len(candidates), failures)
     if not candidates:
         return None
@@ -450,10 +480,12 @@ def fetch_lrclib(info: SongInfo) -> Optional[Hit]:
     if chosen is not None:
         log.info("lrclib: record #%s chosen (%s)", chosen.get("id", "?"), note)
         return _pick_lrclib(chosen)
-    # Nothing with lyrics; honour an instrumental flag only from a length-matched record.
+    # Nothing with lyrics; honour an instrumental flag only from a length-matched record
+    # (or any record when the file length is unknown).
     for item in candidates.values():
-        if item.get("instrumental") and info.duration and abs(float(item.get("duration") or 0) - info.duration) <= DURATION_TOLERANCE:
-            return "", True, float(item.get("duration") or 0)
+        ref = _num(item.get("duration"))
+        if item.get("instrumental") and (not info.duration or abs(ref - info.duration) <= DURATION_TOLERANCE):
+            return "", True, ref
     return None
 
 
@@ -478,19 +510,24 @@ def fetch_syncedlyrics(info: SongInfo) -> Optional[Hit]:
 
 
 # --------------------------------------------------------------------------- entry point
-def fetch_lyrics(info: SongInfo, settings: Settings) -> Lyrics:
-    """Return the best available Lyrics for a song (possibly empty)."""
-    attempts = [("sidecar", lambda: _sidecar(info)),
-                ("lrclib", lambda: fetch_lrclib(info)),
-                ("syncedlyrics", lambda: fetch_syncedlyrics(info))]
+def fetch_lyrics(info: SongInfo) -> Lyrics:
+    """Return the best available Lyrics for a song (possibly empty).
+
+    The user's global lyric offset is applied by the caller after caching, so this
+    function is deliberately independent of Settings.
+    """
+    attempts: List[Tuple[str, Callable[[], Optional[Hit]]]] = [
+        ("sidecar", lambda: _sidecar(info)),
+        ("lrclib", lambda: fetch_lrclib(info)),
+        ("syncedlyrics", lambda: fetch_syncedlyrics(info)),
+    ]
 
     instrumental_source = ""
-    for name, fn in attempts:
+    for source, fn in attempts:
         result = fn()
         if not result:
             continue
-        text, synced, ref = result[0], result[1], float(result[2] or 0.0)
-        source = result[3] if len(result) > 3 else name
+        text, synced, ref = result
         if synced and not text.strip():
             # Community "instrumental" flags are not always right; keep trying other
             # providers and only trust the flag if nobody has lyrics.

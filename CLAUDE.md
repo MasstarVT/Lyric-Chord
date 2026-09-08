@@ -41,13 +41,15 @@ cancel checks between stages.
 **Chord source priority** (`pipeline/chords/__init__.py::get_chords`): sidecar chord sheet
 next to the audio -> Ultimate Guitar sheet (opt-in, scraping) -> local librosa detection.
 Sheet-based sources produce chords with no timing of their own; `chords/sheet.py` places
-them by fuzzy-matching sheet lines to time-stamped lyric lines, so they require synced
-lyrics and fall back to audio analysis otherwise. `chords/local.py` is chroma template
+them by fuzzy-matching sheet lines to time-stamped lyric lines, so `track_from_sheet`
+itself refuses unsynced lyrics (the guard lives there, not at the call sites) and the
+caller falls back to audio analysis. `chords/local.py` is chroma template
 matching plus Viterbi smoothing; its tunables are module constants at the top of the file.
 `chords/theory.py` owns chord parsing/spelling and key logic and is used by all three.
 
-**Identification** (`pipeline/metadata.py`): tags -> filename -> title-only lookups ->
-AcoustID. Title-only lookups exist because untagged rips are common: lrclib's search
+**Identification** (`pipeline/metadata.py`): tags -> filename -> AcoustID (if a key is
+configured; it is authoritative so it precedes the guesses) -> title-only lookups.
+Title-only lookups exist because untagged rips are common: lrclib's search
 results vote on the artist (`artist_consensus`), then a MusicBrainz recording search
 filtered by the file's duration picks the exact recording (`rank_musicbrainz` weights
 duration closeness and release count, since MusicBrainz text scores rank every cover
@@ -77,10 +79,12 @@ candidate's score; `tests/eye in the sky.mp3` (git-ignored, 6:31 album edit, voi
 enters at 2:13) is the reference case. `score_lyrics_candidate` (synced > plain, then closest length) is only the
 fallback when no record matches the file's length. `Lyrics.ref_duration` records the
 chosen edition's length and `duration_mismatch()` drives both the log warning and the
-on-screen note. `LYRICS_CACHE_KEY` in `processor.py` must be bumped whenever selection
-logic changes, otherwise cached bad choices survive. Plain lyrics
-are spread evenly and flagged `synced=False`. An "instrumental" flag from one provider
-does not stop the search. `parse_lrc` honours the `[offset:]` header.
+on-screen note. The lrclib queries run in a small thread pool (they are independent);
+the artist filter falls back to the unfiltered pool when it would empty it, because the
+artist may itself be a guess. Plain lyrics are spread evenly and flagged
+`synced=False`. An "instrumental" flag from one provider does not stop the search.
+`parse_lrc` honours the `[offset:]` header. All providers return the same 3-tuple `Hit`;
+empty text with `synced=True` is the in-band "instrumental" signal.
 
 **Rendering** deliberately avoids MoviePy. `render/frames.py::FrameComposer` builds a static
 layer once (background, panels, header) and draws only time-dependent parts per frame,
@@ -105,12 +109,25 @@ Settings that change chord results must be included in `chord_settings_fingerpri
 which is part of the cache key.
 
 **Cache** (`pipeline/cache.py`): JSON under `<output_dir>/.lyricchord_cache/`, keyed by
-file path+size+mtime. Lyrics are cached before the user offset is applied; chords are
-cached per settings fingerprint.
+file path+size+mtime. Lyrics are cached before the user offset is applied, only when a
+lookup succeeded (a miss is retried next run), and never when a sidecar exists (sidecars
+are read fresh). The lyrics cache key is a hash of `lyrics.py` + `vocal.py` source
+(`processor.lyrics_cache_key`), so any edit to selection logic invalidates old picks
+without a manual bump. Chords are cached per `chord_settings_fingerprint`, plus a
+`lyrics_fingerprint` whenever a sheet source is possible, because sheet chords are
+aligned to the lyric timeline.
 
 ## Gotchas
 
-- librosa 1.0 is installed: every librosa call must use keyword arguments.
+- librosa 1.0 is installed: its functions take keyword-only arguments after the leading
+  data parameters, so pass everything by keyword (the code does, including `y=`/`data=`).
+- `errors.Cancelled` is the one cancel exception; `processor.py`, `renderer.py` and
+  `cli.py` all import it. A second class with the same name breaks cancel routing.
+- `utils/audio.py::probe_duration` reads FFmpeg's input banner (no decode);
+  `decode_audio` accepts `start`/`duration` so callers decode only the window they need.
+- `utils/net.py` holds the one User-Agent; MusicBrainz rate-limits per agent.
+- `theory.parse_label` only accepts an explicit list of quality suffixes, so capitalised
+  words ("Amen", "Go") are not chords; extend `_QUALITY_CANON` rather than loosening it.
 - CustomTkinter 6 and tkinterdnd2: drag-and-drop works by mixing `TkinterDnD.DnDWrapper`
   into the root class and calling `TkinterDnD._require(self)`; tkinterdnd2 patches
   `drop_target_register`/`dnd_bind` onto all widgets at import time.

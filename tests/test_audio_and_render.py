@@ -113,6 +113,57 @@ def test_render_with_loop_background(progression_wav: Path, tmp_path: Path):
     assert out.stat().st_size > 5_000 and "1280x720" in probe and "Audio: aac" in probe
 
 
+def test_probe_duration_and_windowed_decode(progression_wav: Path):
+    from lyricchord.utils.audio import decode_audio, probe_duration
+    assert abs(probe_duration(progression_wav) - 12.0) < 0.1
+    window = decode_audio(progression_wav, SR, start=3.0, duration=2.0)
+    assert abs(window.size - 2 * SR) < SR * 0.05
+
+
+def test_vocal_onset_rise_never_returns_nan(progression_wav: Path):
+    from lyricchord.pipeline.vocal import vocal_onset_rise
+    rises = vocal_onset_rise(progression_wav, [3.0, 40.0, 90.0])   # last two lie past the 12 s of audio
+    assert len(rises) == 3 and all(np.isfinite(r) for r in rises)
+    assert rises[1] == 0.0 and rises[2] == 0.0
+
+
+def test_render_drawing_error_kills_ffmpeg(progression_wav: Path, tmp_path: Path, monkeypatch):
+    import lyricchord.render.renderer as renderer
+
+    class Broken(renderer.FrameComposer):
+        def render(self, t):
+            if t > 0.5:
+                raise OSError("simulated glyph failure")
+            return super().render(t)
+
+    monkeypatch.setattr(renderer, "FrameComposer", Broken)
+    song = SongData(SongInfo(progression_wav, "T", "A", duration=3.0), Lyrics(), ChordTrack())
+    settings = Settings(resolution="720p (1280x720)", fps=24, preset="ultrafast")
+    out = tmp_path / "broken.mp4"
+    with pytest.raises(OSError):
+        renderer.render_video(song, settings, out)      # must not hang waiting on FFmpeg
+    assert not out.exists() and not out.with_name("broken.part.mp4").exists()
+
+
+def test_empty_lyrics_are_not_cached(progression_wav: Path, tmp_path: Path, monkeypatch):
+    import lyricchord.pipeline.processor as processor
+    calls = []
+
+    def fake_fetch(info):
+        calls.append(info.title)
+        return Lyrics()
+
+    monkeypatch.setattr(processor, "fetch_lyrics", fake_fetch)
+    monkeypatch.setattr(processor, "render_video", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(processor, "get_chords", lambda *a, **k: ChordTrack(events=[ChordEvent(0, 12, "C")], source="t"))
+    import lyricchord.render.renderer as renderer
+    monkeypatch.setattr(renderer, "render_video", lambda *a, **k: None)
+    settings = Settings(output_dir=str(tmp_path), use_cache=True)
+    processor.process_song(progression_wav, settings)
+    processor.process_song(progression_wav, settings)
+    assert calls == ["progression", "progression"]    # second run fetched again, not served from cache
+
+
 def test_frame_bytes_size():
     song = SongData(SongInfo(Path("x.mp3"), "T", "A", duration=10.0), Lyrics(), ChordTrack())
     c = FrameComposer(song, Settings(), 320, 180)

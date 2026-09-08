@@ -79,13 +79,9 @@ def render_video(song: SongData, settings: Settings, out_path: Path,
     duration = song.info.duration
     total = max(1, math.ceil(duration * fps))
 
-    loop_video: Optional[Path] = None
-    if settings.background_style == "loop":
-        cand = Path(settings.loop_video_path) if settings.loop_video_path else None
-        if cand and cand.is_file():
-            loop_video = cand
-        else:
-            log.warning("Loop background video not found; falling back to gradient")
+    loop_video = settings.loop_video()
+    if settings.background_style == "loop" and loop_video is None:
+        log.warning("Loop background video not found; falling back to gradient")
 
     composer = FrameComposer(song, settings, width, height, transparent=loop_video is not None)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,20 +105,23 @@ def render_video(song: SongData, settings: Settings, out_path: Path,
         for i in range(total):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            proc.stdin.write(composer.render(i / fps))
+            frame = composer.render(i / fps)   # drawing errors propagate as themselves
+            try:
+                proc.stdin.write(frame)
+            except (BrokenPipeError, OSError):
+                raise _FFmpegDied() from None
             if i % report_every == 0 and progress:
                 progress(i / total)
         proc.stdin.close()
         rc = proc.wait()
-    except Cancelled:
-        proc.kill()
-        proc.wait()
+    except BaseException as exc:
+        # Whatever went wrong - cancel, FFmpeg dying, a drawing error - never leave FFmpeg
+        # alive and blocked on its stdin, and never leave a partial file behind.
+        _terminate(proc)
         tmp.unlink(missing_ok=True)
+        if isinstance(exc, _FFmpegDied):
+            raise RuntimeError(f"FFmpeg stopped accepting frames: {_tail(err_chunks)}") from None
         raise
-    except (BrokenPipeError, OSError):
-        proc.wait()
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"FFmpeg stopped accepting frames: {_tail(err_chunks)}")
 
     if rc != 0:
         tmp.unlink(missing_ok=True)
@@ -134,6 +133,25 @@ def render_video(song: SongData, settings: Settings, out_path: Path,
         progress(1.0)
     log.info("Wrote %s (%dx%d @ %dfps, %d frames)", out_path.name, width, height, fps, total)
     return out_path
+
+
+class _FFmpegDied(Exception):
+    """Internal: the pipe to FFmpeg closed before all frames were written."""
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    for stream in (proc.stdin,):
+        try:
+            if stream:
+                stream.close()
+        except OSError:
+            pass
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:  # pragma: no cover
+        log.warning("FFmpeg did not exit after kill")
 
 
 def _tail(chunks: List[bytes], n: int = 600) -> str:

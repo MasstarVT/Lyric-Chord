@@ -49,11 +49,15 @@ def find_ffmpeg() -> str:
 
 
 def ffmpeg_version() -> Optional[str]:
+    """First line of `ffmpeg -version`, or None if it cannot be run.
+
+    Raises FFmpegNotFound when no binary exists at all, so callers can tell
+    "missing" apart from "present but not answering".
+    """
+    exe = find_ffmpeg()  # may raise FFmpegNotFound
     try:
-        out = subprocess.run(
-            [find_ffmpeg(), "-version"], capture_output=True, text=True, timeout=10,
-            creationflags=no_window_flag(),
-        )
+        out = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=10,
+                             creationflags=no_window_flag())
         return out.stdout.splitlines()[0] if out.stdout else None
     except Exception:
         return None

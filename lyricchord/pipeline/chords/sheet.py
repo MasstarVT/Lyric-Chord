@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ...models import ChordEvent, LyricLine, Lyrics
 from ...utils.text import normalize
-from .theory import parse_label
+from .theory import is_chord_token, parse_label
 
 SECTION_RE = re.compile(
     r"^\s*[\[\(]?\s*(verse|chorus|bridge|intro|outro|pre[- ]?chorus|solo|instrumental|"
@@ -50,22 +50,28 @@ def strip_ug_markup(text: str) -> str:
     return UG_CH_RE.sub(lambda m: m.group(1), text).replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _chord_tokens(line: str) -> Optional[List[Tuple[int, str]]]:
+    """(column, label) for every chord on a chord-only line, or None if any token is
+    not a chord (then the line is lyrics). One tokenizer serves both questions so the
+    classification and the extracted positions can never disagree."""
+    out: List[Tuple[int, str]] = []
+    for m in re.finditer(r"\S+", line):
+        raw = m.group(0)
+        tok = raw.strip("()[]|,")
+        if not tok or raw.lower() in _IGNORED_TOKENS or tok.lower() in _IGNORED_TOKENS:
+            continue
+        if not is_chord_token(tok):
+            return None
+        out.append((m.start(), tok))
+    return out or None
+
+
 def _is_chord_line(line: str) -> bool:
-    tokens = [t for t in line.split() if t.lower() not in _IGNORED_TOKENS]
-    if not tokens:
-        return False
-    return all(parse_label(t.strip("()[]|,")) is not None for t in tokens)
+    return _chord_tokens(line) is not None
 
 
 def _chord_positions(line: str) -> List[Tuple[int, str]]:
-    out = []
-    for m in re.finditer(r"\S+", line):
-        tok = m.group(0).strip("()[]|,")
-        if tok.lower() in _IGNORED_TOKENS:
-            continue
-        if parse_label(tok) is not None:
-            out.append((m.start(), tok))
-    return out
+    return _chord_tokens(line) or []
 
 
 def _parse_inline(line: str) -> Optional[SheetLine]:
@@ -150,7 +156,10 @@ def align_sheet_to_lyrics(sheet: List[SheetLine], lyrics: Lyrics, duration: floa
     sheet_lyric_idx = [i for i, s in enumerate(sheet) if s.text.strip()]
     if not lyric_lines or not sheet_lyric_idx:
         return []
-    norm_sheet: Dict[int, str] = {i: normalize(sheet[i].text) for i in sheet_lyric_idx}
+    # One matcher per sheet line: SequenceMatcher indexes its second sequence once and
+    # set_seq1() is cheap, so this avoids rebuilding that index for every lyric line.
+    matchers: Dict[int, SequenceMatcher] = {i: SequenceMatcher(None, "", normalize(sheet[i].text))
+                                            for i in sheet_lyric_idx}
 
     timed: List[Tuple[float, str]] = []
     anchors: List[Tuple[int, LyricLine]] = []     # (sheet index, matched lyric line)
@@ -159,7 +168,8 @@ def align_sheet_to_lyrics(sheet: List[SheetLine], lyrics: Lyrics, duration: floa
         nl = normalize(L.text)
         best, best_score = None, 0.0
         for i in sheet_lyric_idx:
-            sm = SequenceMatcher(None, nl, norm_sheet[i])
+            sm = matchers[i]
+            sm.set_seq1(nl)
             if sm.real_quick_ratio() < best_score or sm.quick_ratio() < best_score:
                 continue
             score = sm.ratio()

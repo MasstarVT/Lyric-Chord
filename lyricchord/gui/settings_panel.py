@@ -16,7 +16,7 @@ import customtkinter as ctk
 
 from ..config import (BACKGROUND_STYLES, ENCODERS, FPS_OPTIONS, GRADIENT_DIRECTIONS, RESOLUTIONS,
                       THEME_PRESETS, Settings)
-from ..utils.fonts import available_fonts
+from ..utils.fonts import find_named_fonts
 
 X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
 AUTO_FONT = "Auto (system default)"
@@ -154,8 +154,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         self._section("Typography and colours")
         self.font_var = tk.StringVar(value=AUTO_FONT)
         self.vars["font_path"] = tk.StringVar()
-        self.vars["bold_font_path"] = tk.StringVar()
-        fonts = available_fonts()
+        fonts = find_named_fonts(POPULAR_FONTS)
         self._font_choices = {label: fonts[stem] for stem, label in POPULAR_FONTS.items() if stem in fonts}
         menu = ctk.CTkOptionMenu(self, values=[AUTO_FONT] + sorted(self._font_choices),
                                  variable=self.font_var, command=self._font_selected)
@@ -203,12 +202,10 @@ class SettingsPanel(ctk.CTkScrollableFrame):
                                        filetypes=[("Fonts", "*.ttf *.otf *.ttc"), ("All files", "*.*")])
         if f:
             self.vars["font_path"].set(f)
-            self.vars["bold_font_path"].set("")
             self.font_var.set(f"Custom: {Path(f).name}")
 
     def _font_selected(self, label: str) -> None:
         self.vars["font_path"].set(self._font_choices.get(label, ""))
-        self.vars["bold_font_path"].set("")
 
     def _apply_theme(self, name: str) -> None:
         for key, value in THEME_PRESETS.get(name, {}).items():

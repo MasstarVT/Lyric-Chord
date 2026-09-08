@@ -84,6 +84,6 @@ def fetch_ultimate_guitar_sheet(artist: str, title: str, timeout: int = 20) -> O
         content = (data.get("store", {}).get("page", {}).get("data", {})
                    .get("tab_view", {}).get("wiki_tab", {}).get("content"))
         return content or None
-    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+    except Exception as exc:  # best effort by design: any breakage falls back to analysis
         log.warning("Ultimate Guitar lookup failed: %s", exc)
         return None

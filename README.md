@@ -32,7 +32,8 @@ now and next on a scrolling timeline that stays in sync with the audio.
   unknown, the title is looked up by consensus of lrclib's entries and on MusicBrainz
   filtered by the file's duration, which also recovers the exact recording name
   (e.g. `eye in the sky.mp3` at 6:31 resolves to "Sirius / Eye in the Sky" by The Alan
-  Parsons Project). Optional AcoustID fingerprinting comes last.
+  Parsons Project). If an AcoustID key is configured, fingerprinting runs before those
+  guesses because it is authoritative.
 - **Lyrics**: sidecar `.lrc`/`.txt` files, then [lrclib.net](https://lrclib.net)
   (synced + plain), then the `syncedlyrics` aggregator (Musixmatch, NetEase, Megalobiz).
   Synced lyrics are chosen by how well their reference recording length matches your
@@ -59,7 +60,8 @@ now and next on a scrolling timeline that stays in sync with the audio.
   adjustable darkening layer.
 - **Output presets**: 720p, 1080p, 1440p, 4K, and vertical 1080x1920 for phones.
 - Results are cached, so re-rendering a batch with a new look does not re-download or
-  re-analyse anything.
+  re-analyse anything. Failed lyric lookups are not cached (they are retried next run),
+  and sidecar files are always read fresh.
 - Headless CLI for scripting.
 
 ## Requirements
@@ -200,11 +202,13 @@ main.py                     entry point (GUI, or --cli)
 lyricchord/
   config.py                 Settings dataclass + JSON persistence + presets
   models.py                 SongInfo, Lyrics, ChordTrack, SongData
+  errors.py                 Cancelled (shared by the pipeline, renderer and CLI)
   gui/app.py                main window, drag & drop, batch thread wiring
   gui/settings_panel.py     scrollable settings form bound to Settings
   gui/log_console.py        colour-coded log widget
   pipeline/metadata.py      tag reading, filename parsing, AcoustID
-  pipeline/lyrics.py        LRC parsing, lrclib + syncedlyrics providers
+  pipeline/lyrics.py        LRC parsing, lrclib + syncedlyrics providers, edition consensus
+  pipeline/vocal.py         narrow-window vocal-entry check used to arbitrate lyric timing
   pipeline/chords/theory.py chord templates, key finding, chord spelling
   pipeline/chords/local.py  librosa chord detection
   pipeline/chords/sheet.py  chord sheet parsing + lyric alignment
@@ -213,7 +217,7 @@ lyricchord/
   pipeline/cache.py         JSON cache of fetched/analysed data
   render/frames.py          frame composition (layout, text, timeline)
   render/renderer.py        FFmpeg command building and piping
-  utils/                    ffmpeg discovery, audio decoding, fonts, text helpers
+  utils/                    ffmpeg discovery, audio decoding, fonts, text helpers, HTTP identity
 tests/                      pytest suite (parsers, theory, synthetic-audio detection, render)
 ```
 

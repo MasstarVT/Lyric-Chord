@@ -140,7 +140,7 @@ class FrameComposer:
         s = self.L.s
 
         reg = settings.font_path
-        bold = settings.bold_font_path or guess_bold_variant(reg)
+        bold = guess_bold_variant(reg)
         self.f_title = load_font(bold, max(8, int(settings.title_size * s)), bold=True)
         self.f_artist = load_font(reg, max(8, int(settings.title_size * 0.62 * s)))
         self.f_lyric = load_font(bold, max(8, int(settings.lyric_size * s)), bold=True)
@@ -166,7 +166,10 @@ class FrameComposer:
         self.events: List[ChordEvent] = list(song.chords.events)
         self.event_starts = [e.start for e in self.events]
 
-        self._text_cache: Dict[tuple, Tuple[Image.Image, int, int]] = {}
+        # Glyph rasterisation and text measurement are the slow parts of a frame; both are
+        # memoised because the same strings repeat for every frame a line is on screen.
+        self._text_cache: Dict[tuple, Tuple[Image.Image, int, int, float]] = {}
+        self._layout_cache: Dict[tuple, object] = {}
         self.static = self._build_static()
 
     # ------------------------------------------------------------------ text helpers
@@ -176,8 +179,8 @@ class FrameComposer:
             self._font_cache[size] = load_font(self._bold_path, size, bold=True)
         return self._font_cache[size]
 
-    def _text_image(self, text: str, font: ImageFont.FreeTypeFont, color: RGB) -> Tuple[Image.Image, int, int]:
-        """Rasterise text once; returns (image, left_offset, top_offset)."""
+    def _text_image(self, text: str, font: ImageFont.FreeTypeFont, color: RGB) -> Tuple[Image.Image, int, int, float]:
+        """Rasterise text once; returns (image, left_offset, top_offset, advance_width)."""
         key = (text, id(font), color)
         hit = self._text_cache.get(key)
         if hit is not None:
@@ -191,8 +194,9 @@ class FrameComposer:
                stroke_fill=(0, 0, 0, 230) if stroke else None)
         if len(self._text_cache) > 3000:
             self._text_cache.clear()
-        self._text_cache[key] = (img, l - 1, t - 1)
-        return img, l - 1, t - 1
+        entry = (img, l - 1, t - 1, font.getlength(text))
+        self._text_cache[key] = entry
+        return entry
 
     def _blit(self, frame: Image.Image, text: str, font: ImageFont.FreeTypeFont, color: RGB,
               x: float, y: float, align: str = "left", fill_fraction: Optional[float] = None,
@@ -200,16 +204,15 @@ class FrameComposer:
         """Draw text with its em-box top-left at (x, y). Returns the text width in px."""
         if not text:
             return 0
-        width = font.getlength(text)
+        img, l, t, width = self._text_image(text, font, color)
         if align == "center":
             x -= width / 2
         elif align == "right":
             x -= width
-        img, l, t = self._text_image(text, font, color)
         pos = (int(round(x + l)), int(round(y + t)))
         frame.paste(img, pos, img)
         if fill_fraction and fill_color:
-            fill_img, _, _ = self._text_image(text, font, fill_color)
+            fill_img, _, _, _ = self._text_image(text, font, fill_color)
             cut = int(fill_img.width * min(1.0, max(0.0, fill_fraction)))
             if cut > 0:
                 part = fill_img.crop((0, 0, cut, fill_img.height))
@@ -221,6 +224,10 @@ class FrameComposer:
         return ascent + descent
 
     def _wrap(self, text: str, font: ImageFont.FreeTypeFont, max_w: int, max_rows: int = 3) -> List[str]:
+        key = ("wrap", text, id(font), max_w, max_rows)
+        hit = self._layout_cache.get(key)
+        if hit is not None:
+            return hit  # type: ignore[return-value]
         words = text.split()
         rows: List[str] = []
         cur = ""
@@ -236,14 +243,21 @@ class FrameComposer:
         if len(rows) > max_rows:
             rows = rows[:max_rows]
             rows[-1] = self._ellipsize(rows[-1] + " ...", font, max_w)
+        self._layout_cache[key] = rows
         return rows
 
     def _ellipsize(self, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
-        if font.getlength(text) <= max_w:
-            return text
-        while text and font.getlength(text + "...") > max_w:
-            text = text[:-1]
-        return text.rstrip() + "..."
+        key = ("ellipsis", text, id(font), max_w)
+        hit = self._layout_cache.get(key)
+        if hit is not None:
+            return hit  # type: ignore[return-value]
+        out = text
+        if font.getlength(out) > max_w:
+            while out and font.getlength(out + "...") > max_w:
+                out = out[:-1]
+            out = out.rstrip() + "..."
+        self._layout_cache[key] = out
+        return out
 
     # ------------------------------------------------------------------ static layer
     def _build_static(self) -> Image.Image:
@@ -420,7 +434,7 @@ class FrameComposer:
         x0, y0, x1, y1 = L.now_box
         label = self.display_label(cur.label) if cur else "—"
         font = self._fit_font(label, self.f_chord, (x1 - x0) - int(30 * L.s))
-        img, _, _ = self._text_image(label, font, self.accent if cur else self.dim)
+        img, _, _, _ = self._text_image(label, font, self.accent if cur else self.dim)
         cap = int(30 * L.s)
         frame.paste(img, (int((x0 + x1) / 2 - img.width / 2), int((y0 + cap + y1) / 2 - img.height / 2)), img)
 
@@ -429,7 +443,7 @@ class FrameComposer:
         if nxt is not None:
             label = self.display_label(nxt.label)
             font = self._fit_font(label, self.f_chord_next, (x1 - x0) - int(24 * L.s))
-            img, _, _ = self._text_image(label, font, self.text)
+            img, _, _, _ = self._text_image(label, font, self.text)
             cap = int(26 * L.s)
             frame.paste(img, (int((x0 + x1) / 2 - img.width / 2), int((y0 + cap + y1) / 2 - img.height / 2 - int(10 * L.s))), img)
             eta = f"in {max(0.0, nxt.start - t):.1f}s"
@@ -460,8 +474,8 @@ class FrameComposer:
             text_color = self.panel if is_cur else self.text
             lbl = self.display_label(ev.label)
             font = self.f_lane
-            if font.getlength(lbl) + int(16 * L.s) <= (bx1 - bx0):
-                img, _, _ = self._text_image(lbl, font, text_color)
+            img, _, _, lbl_w = self._text_image(lbl, font, text_color)
+            if lbl_w + int(16 * L.s) <= (bx1 - bx0):
                 frame.paste(img, (int((bx0 + bx1) / 2 - img.width / 2), int((ly0 + ly1) / 2 - img.height / 2)), img)
 
     def _draw_progress(self, frame: Image.Image, draw: ImageDraw.ImageDraw, t: float) -> None:
@@ -499,7 +513,7 @@ def demo_song(duration: float = 214.0) -> SongData:
 def render_preview(settings: Settings, t: float = 34.5, size: Optional[Tuple[int, int]] = None) -> Image.Image:
     """Render one frame of the demo song with the given settings (for the GUI preview)."""
     W, H = size or settings.size
-    transparent = settings.background_style == "loop"
+    transparent = settings.loop_video() is not None   # same rule as the real render
     composer = FrameComposer(demo_song(), settings, W, H, transparent=transparent)
     img = composer.render_image(t)
     if transparent:

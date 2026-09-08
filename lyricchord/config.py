@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 log = logging.getLogger("lyricchord")
 
@@ -78,8 +78,7 @@ class Settings:
     loop_dim: float = 0.45              # darken the loop video so text stays legible
 
     # --- Typography / colours --------------------------------------------
-    font_path: str = ""                 # "" = auto-detect a system font
-    bold_font_path: str = ""
+    font_path: str = ""                 # "" = auto-detect a system font (bold variant is inferred)
     title_size: int = 56
     lyric_size: int = 64
     context_lyric_size: int = 42
@@ -117,9 +116,15 @@ class Settings:
     def size(self) -> Tuple[int, int]:
         return RESOLUTIONS.get(self.resolution, (1920, 1080))
 
-    def apply_theme(self, name: str) -> None:
-        for k, v in THEME_PRESETS.get(name, {}).items():
-            setattr(self, k, v)
+    def loop_video(self) -> Optional[Path]:
+        """The loop background file if that mode is active and the file exists, else None.
+
+        Shared by the renderer and the layout preview so both agree on which mode runs.
+        """
+        if self.background_style != "loop" or not self.loop_video_path:
+            return None
+        p = Path(self.loop_video_path)
+        return p if p.is_file() else None
 
     def to_dict(self) -> dict:
         return asdict(self)

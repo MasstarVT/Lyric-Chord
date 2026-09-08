@@ -10,7 +10,6 @@ import argparse
 import logging
 import sys
 import threading
-from pathlib import Path
 from typing import List, Optional
 
 from .config import RESOLUTIONS, Settings

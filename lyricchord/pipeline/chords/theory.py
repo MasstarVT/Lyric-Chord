@@ -133,18 +133,22 @@ def spell(root: int, quality: str, use_flats: bool) -> str:
 _CHORD_RE = re.compile(
     r"^(?P<root>[A-G])(?P<acc>[#b♯♭]?)(?P<qual>[^/\s]*?)(?:/(?P<bass>[A-G][#b]?))?$"
 )
-_QUALITY_MAP = [
-    # (regex on the quality string, canonical quality)
-    (re.compile(r"^(maj7|M7|Δ|Δ7)"), "maj7"),
-    (re.compile(r"^(m7|min7|-7)"), "min7"),
-    (re.compile(r"^(dim|°|o7?|m7b5|ø)"), "dim"),
-    (re.compile(r"^(aug|\+)"), "aug"),
-    (re.compile(r"^sus2"), "sus2"),
-    (re.compile(r"^(sus4|sus)"), "sus4"),
-    (re.compile(r"^(m|min|-)(?!aj)"), "min"),
-    (re.compile(r"^(7|9|11|13|dom7)"), "7"),
-    (re.compile(r"^(maj|M|6|add|2|4|5|\(|$)"), "maj"),
-]
+# Every quality suffix we accept, mapped to its canonical quality. The suffix must match
+# in full (plus an optional parenthesised alteration such as "(b5)"), so ordinary words
+# that start with a note letter - "Amen", "Come", "Go", "Do" - are not read as chords.
+_QUALITY_CANON: Dict[str, str] = {
+    "": "maj", "maj": "maj", "M": "maj", "6": "maj", "69": "maj", "6/9": "maj", "5": "maj",
+    "2": "maj", "4": "maj", "add9": "maj", "add2": "maj", "add4": "maj", "add11": "maj",
+    "maj7": "maj7", "maj9": "maj7", "maj13": "maj7", "M7": "maj7", "Δ": "maj7", "Δ7": "maj7",
+    "m": "min", "min": "min", "-": "min", "m6": "min",
+    "m7": "min7", "min7": "min7", "-7": "min7", "m9": "min7", "m11": "min7", "m13": "min7",
+    "7": "7", "9": "7", "11": "7", "13": "7", "dom7": "7", "7sus4": "7", "7sus2": "7",
+    "7#9": "7", "7b9": "7", "7#5": "7", "7b5": "7",
+    "dim": "dim", "dim7": "dim", "°": "dim", "°7": "dim", "o7": "dim", "ø": "dim", "ø7": "dim", "m7b5": "dim",
+    "aug": "aug", "+": "aug",
+    "sus2": "sus2", "sus4": "sus4", "sus": "sus4",
+}
+_ALTERATION_RE = re.compile(r"\([^)]*\)$")
 
 
 def parse_label(label: str) -> Optional[Chord]:
@@ -159,11 +163,9 @@ def parse_label(label: str) -> Optional[Chord]:
     pc = NOTE_TO_PC.get(root)
     if pc is None:
         return None
-    qual = m.group("qual") or ""
-    for rx, canon in _QUALITY_MAP:
-        if rx.match(qual):
-            return pc, canon
-    return None
+    qual = _ALTERATION_RE.sub("", m.group("qual") or "")
+    canon = _QUALITY_CANON.get(qual)
+    return (pc, canon) if canon else None
 
 
 def is_chord_token(token: str) -> bool:

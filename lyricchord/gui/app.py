@@ -22,6 +22,7 @@ import customtkinter as ctk
 
 from ..config import Settings
 from ..pipeline.processor import BatchRunner, find_audio_files
+from ..utils.audio import AUDIO_EXTENSIONS
 from ..utils.ffmpeg import FFmpegNotFound, ffmpeg_version
 from ..utils.logging_utils import get_logger, setup_logging
 from .log_console import LogConsole
@@ -36,7 +37,7 @@ except Exception:  # pragma: no cover - missing native library
 
 log = get_logger()
 
-AUDIO_FILETYPES = [("Audio files", "*.mp3 *.m4a *.flac *.wav *.ogg *.opus *.aac *.wma"), ("All files", "*.*")]
+AUDIO_FILETYPES = [("Audio files", " ".join(f"*{ext}" for ext in sorted(AUDIO_EXTENSIONS))), ("All files", "*.*")]
 STATUS_ICON = {"pending": "   ", "running": "▶ ", "done": "✓ ", "error": "✗ "}
 
 _Base = (ctk.CTk, TkinterDnD.DnDWrapper) if _DND_IMPORT_OK else (ctk.CTk,)
@@ -264,7 +265,9 @@ class App(*_Base):  # type: ignore[misc]
         self.start_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
         self.status_label.configure(text=f"Starting batch of {len(self.files)} file(s)...")
-        self.runner = BatchRunner(list(self.files), settings, self.events, self.cancel_event)
+        # The worker gets its own copy: the panel keeps mutating self.settings on the Tk thread.
+        self.runner = BatchRunner(list(self.files), Settings.from_dict(settings.to_dict()),
+                                  self.events, self.cancel_event)
         self.runner.start()
 
     def _cancel(self) -> None:
